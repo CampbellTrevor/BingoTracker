@@ -87,11 +87,12 @@ def main():
             st.divider()
 
             # --- TABS ---
-            tab_leader, tab_items, tab_player, tab_rankings, tab_raw = st.tabs([
+            tab_leader, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_raw = st.tabs([
                 "🏆 Leaderboards",
                 "📦 Item Stats",
                 "🔍 Individual Search",
                 "📊 Player Rankings",
+                "👥 Team Rankings",
                 "💾 Cleaned Data"
             ])
 
@@ -203,7 +204,29 @@ def main():
                 else:
                     st.info("No items found in the uploaded data.")
 
-            # TAB 5: RAW DATA
+            # TAB 5: TEAM RANKINGS
+            with tab_team_rankings:
+                st.subheader("Top Players by Team")
+                teams = sorted(df['Team'].dropna().unique())
+                if teams:
+                    selected_team = st.selectbox("Choose a Team", teams, key="rank_team")
+
+                    team_player_rank_df = (
+                        df[df['Team'] == selected_team]
+                        .groupby('Player', as_index=False)['Points']
+                        .sum()
+                        .sort_values('Points', ascending=False)
+                    )
+                    team_player_rank_df.insert(0, "Rank", range(1, len(team_player_rank_df) + 1))
+                    st.dataframe(
+                        team_player_rank_df[['Rank', 'Player', 'Points']],
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                else:
+                    st.info("No teams found in the uploaded data.")
+
+            # TAB 6: RAW DATA
             with tab_raw:
                 st.write("Cleaned Data (Using 'Awarded Points'):")
                 st.dataframe(df, use_container_width=True)

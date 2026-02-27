@@ -426,32 +426,43 @@ def main():
                     )
 
                     st.divider()
-                    st.subheader(f"{selected_team} Category Points Breakdown")
+                    st.subheader(f"{selected_team} Item Points by Category")
+                    team_df = df[df['Team'] == selected_team]
+                    team_categories = sorted(team_df['Category'].dropna().unique())
 
-                    team_category_points_df = (
-                        df[df['Team'] == selected_team]
-                        .groupby('Category', as_index=False)['Points']
-                        .sum()
-                        .sort_values('Points', ascending=False)
-                    )
-                    team_category_points_df.insert(0, "Rank", range(1, len(team_category_points_df) + 1))
+                    if team_categories:
+                        selected_team_category = st.selectbox(
+                            "Choose a Category",
+                            team_categories,
+                            key="rank_team_category"
+                        )
 
-                    fig_team_categories = px.bar(
-                        team_category_points_df,
-                        x='Points',
-                        y='Category',
-                        orientation='h',
-                        text='Points',
-                        color='Points',
-                        title=f"{selected_team}: Points by Category"
-                    )
-                    fig_team_categories.update_layout(yaxis={'categoryorder': 'total ascending'})
-                    st.plotly_chart(fig_team_categories, use_container_width=True)
-                    st.dataframe(
-                        team_category_points_df[['Rank', 'Category', 'Points']],
-                        hide_index=True,
-                        use_container_width=True
-                    )
+                        team_item_points_df = (
+                            team_df[team_df['Category'] == selected_team_category]
+                            .groupby('Item', as_index=False)['Points']
+                            .sum()
+                            .sort_values('Points', ascending=False)
+                        )
+                        team_item_points_df.insert(0, "Rank", range(1, len(team_item_points_df) + 1))
+
+                        fig_team_items = px.bar(
+                            team_item_points_df.head(20),
+                            x='Points',
+                            y='Item',
+                            orientation='h',
+                            text='Points',
+                            color='Points',
+                            title=f"{selected_team} - {selected_team_category}: Points by Item"
+                        )
+                        fig_team_items.update_layout(yaxis={'categoryorder': 'total ascending'})
+                        st.plotly_chart(fig_team_items, use_container_width=True)
+                        st.dataframe(
+                            team_item_points_df[['Rank', 'Item', 'Points']],
+                            hide_index=True,
+                            use_container_width=True
+                        )
+                    else:
+                        st.info("No categories found for this team.")
                 else:
                     st.info("No teams found in the uploaded data.")
 

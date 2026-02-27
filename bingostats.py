@@ -16,8 +16,9 @@ WOM_MAX_RETRIES = 5
 WOM_BASE_BACKOFF_SECONDS = 1.5
 WOM_PLAYER_ALIASES = {
     # CSV player name: Wise Old Man player name
+    "Iron Thrage": "Thrayge",
     # "Stoke024": "Stoke 024",
-    # "Iron Thrage": "SomeWOMName",
+    # "CIA PKed JFK": "ExactWOMNameIfDifferent",
 }
 SUPPORTED_WOM_BOSS_METRICS = {
     "abyssal_sire", "alchemical_hydra", "amoxliatl", "araxxor", "artio",

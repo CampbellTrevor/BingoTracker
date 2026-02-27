@@ -1,9 +1,11 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+from pathlib import Path
 
 # --- Page Configuration ---
 st.set_page_config(page_title="OSRS Bingo Tracker", layout="wide", page_icon="⚔️")
+DEFAULT_CSV_PATH = Path("Copy of Copy of Winter Bingo 2026 - Event Log - New Log.csv")
 
 # --- 1. Data Cleaning Engine ---
 @st.cache_data
@@ -56,12 +58,18 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.header("Upload Log")
-        uploaded_file = st.file_uploader("Upload your 'Event Log' CSV", type=['csv'])
+        st.header("Data Source")
+        uploaded_file = st.file_uploader("Optional: Upload a replacement CSV", type=['csv'])
+        if DEFAULT_CSV_PATH.exists():
+            st.caption(f"Using bundled data by default: {DEFAULT_CSV_PATH.name}")
+        else:
+            st.caption("Bundled CSV not found. Upload a CSV to continue.")
         st.caption("Now using 'Awarded Points' for accurate scoring.")
 
-    if uploaded_file is not None:
-        df = load_and_clean_data(uploaded_file)
+    data_source = uploaded_file if uploaded_file is not None else (DEFAULT_CSV_PATH if DEFAULT_CSV_PATH.exists() else None)
+
+    if data_source is not None:
+        df = load_and_clean_data(data_source)
         
         if not df.empty:
             # --- KPI ROW ---
@@ -201,7 +209,7 @@ def main():
                 st.dataframe(df, use_container_width=True)
 
     else:
-        st.info("👋 Upload your CSV file to see the corrected scores.")
+        st.info(f"👋 No CSV available. Add {DEFAULT_CSV_PATH.name} to the app folder or upload a CSV.")
 
 if __name__ == "__main__":
     main()

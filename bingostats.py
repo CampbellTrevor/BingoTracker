@@ -119,10 +119,17 @@ def _normalize_name(name):
 
 
 def _resolve_csv_player_to_wom_key(player_name):
-    alias_target = WOM_PLAYER_ALIASES.get(str(player_name).strip())
+    raw_name = str(player_name).strip()
+    alias_target = WOM_PLAYER_ALIASES.get(raw_name)
+    if alias_target is None:
+        normalized_raw_name = _normalize_name(raw_name)
+        for alias_source, alias_value in WOM_PLAYER_ALIASES.items():
+            if _normalize_name(alias_source) == normalized_raw_name:
+                alias_target = alias_value
+                break
     if alias_target:
         return _normalize_name(alias_target)
-    return _normalize_name(player_name)
+    return _normalize_name(raw_name)
 
 
 def _wom_retry_delay_seconds(response, attempt):
@@ -388,14 +395,34 @@ def main():
             col4.metric("Leading Team", top_team.split('-')[0]) 
 
             st.divider()
+            event_start_date = df["Date"].min()
+            event_end_date = df["Date"].max()
+            event_start_date_str = event_start_date.strftime("%Y-%m-%d")
+            event_end_date_str = event_end_date.strftime("%Y-%m-%d")
+            prefetch_metrics = sorted(
+                {
+                    metric
+                    for category_metrics in CATEGORY_TO_WOM_BOSSES.values()
+                    for metric in category_metrics
+                    if metric in SUPPORTED_WOM_BOSS_METRICS
+                }
+            )
+            prefetched_kc_by_metric, prefetch_errors = load_wom_group_metrics_from_file(
+                str(WOM_CACHE_FILE),
+                WOM_GROUP_ID,
+                event_start_date_str,
+                event_end_date_str,
+                tuple(prefetch_metrics)
+            )
 
             # --- TABS ---
-            tab_leader, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_spooned, tab_raw = st.tabs([
+            tab_leader, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_highest_kc, tab_spooned, tab_raw = st.tabs([
                 "🏆 Leaderboards",
                 "📦 Item Stats",
                 "🔍 Individual Search",
                 "📊 Player Rankings",
                 "👥 Team Rankings",
+                "⚔️ Highest KC",
                 "🥄 Spooned Index",
                 "💾 Cleaned Data"
             ])
@@ -452,11 +479,22 @@ def main():
                 
                 if selected_player:
                     p_data = df[df['Player'] == selected_player]
+                    wom_lookup_key = _resolve_csv_player_to_wom_key(selected_player)
+                    player_total_kc_gain = sum(
+                        prefetched_kc_by_metric.get(metric_name, {}).get(wom_lookup_key, 0.0)
+                        for metric_name in prefetch_metrics
+                    )
+                    player_total_kc_display = (
+                        f"{int(player_total_kc_gain):,}"
+                        if player_total_kc_gain > 0
+                        else "No WoM Data"
+                    )
                     
-                    pk1, pk2, pk3 = st.columns(3)
+                    pk1, pk2, pk3, pk4 = st.columns(4)
                     pk1.metric("Submissions", len(p_data))
                     pk2.metric("Total Points", int(p_data['Points'].sum()))
                     pk3.metric("Favorite Tile", p_data['Category'].mode()[0] if not p_data.empty else "N/A")
+                    pk4.metric("WoM KC (Event)", player_total_kc_display)
                     
                     st.write(f"### Submission History for {selected_player}")
                     st.dataframe(
@@ -569,31 +607,89 @@ def main():
                 else:
                     st.info("No teams found in the uploaded data.")
 
-            # TAB 6: SPOONED INDEX
+            # TAB 6: HIGHEST KC
+            with tab_highest_kc:
+                st.subheader("Highest KC by Category")
+                st.caption(
+                    f"Using cached WOM data from {WOM_CACHE_FILE.name} for range "
+                    f"{event_start_date_str} to {event_end_date_str}."
+                )
+
+                available_kc_categories = sorted(
+                    [
+                        cat for cat in df["Category"].dropna().unique()
+                        if cat in CATEGORY_TO_WOM_BOSSES
+                    ]
+                )
+
+                if available_kc_categories:
+                    selected_kc_category = st.selectbox(
+                        "Choose a Category",
+                        available_kc_categories,
+                        key="highest_kc_category"
+                    )
+                    selected_kc_metrics = [
+                        metric for metric in CATEGORY_TO_WOM_BOSSES[selected_kc_category]
+                        if metric in SUPPORTED_WOM_BOSS_METRICS
+                    ]
+
+                    if selected_kc_metrics:
+                        category_points_by_player = (
+                            df[df["Category"] == selected_kc_category]
+                            .groupby("Player", as_index=False)["Points"]
+                            .sum()
+                        )
+
+                        kc_rows = []
+                        for player in sorted(df["Player"].dropna().unique()):
+                            wom_lookup_key = _resolve_csv_player_to_wom_key(player)
+                            player_kc_gain = sum(
+                                prefetched_kc_by_metric.get(metric_name, {}).get(wom_lookup_key, 0.0)
+                                for metric_name in selected_kc_metrics
+                            )
+                            player_points = float(
+                                category_points_by_player.loc[
+                                    category_points_by_player["Player"] == player,
+                                    "Points"
+                                ].sum()
+                            )
+                            kc_rows.append(
+                                {
+                                    "Player": player,
+                                    "KC Gain": round(player_kc_gain, 2),
+                                    "Points": round(player_points, 2),
+                                }
+                            )
+
+                        kc_df = pd.DataFrame(kc_rows).sort_values(
+                            by=["KC Gain", "Points"],
+                            ascending=[False, False]
+                        ).reset_index(drop=True)
+                        kc_df.insert(0, "Rank", range(1, len(kc_df) + 1))
+
+                        fig_kc = px.bar(
+                            kc_df.head(20),
+                            x="KC Gain",
+                            y="Player",
+                            orientation="h",
+                            text="KC Gain",
+                            color="KC Gain",
+                            title=f"Top KC Gains - {selected_kc_category}"
+                        )
+                        fig_kc.update_layout(yaxis={"categoryorder": "total ascending"})
+                        st.plotly_chart(fig_kc, use_container_width=True)
+                        st.dataframe(kc_df, hide_index=True, use_container_width=True)
+                    else:
+                        st.info("No supported WOM boss metrics are mapped for this category.")
+                else:
+                    st.info("No categories available for Highest KC view.")
+
+            # TAB 7: SPOONED INDEX
             with tab_spooned:
                 st.subheader("Biggest Spoons by Boss KC Gain")
                 st.caption(
                     f"Using Wise Old Man group pulls (group {WOM_GROUP_ID}, competition ref {WOM_COMPETITION_ID}) "
                     "from a committed cache file for fast category switching."
-                )
-                event_start_date = df["Date"].min()
-                event_end_date = df["Date"].max()
-                event_start_date_str = event_start_date.strftime("%Y-%m-%d")
-                event_end_date_str = event_end_date.strftime("%Y-%m-%d")
-                prefetch_metrics = sorted(
-                    {
-                        metric
-                        for category_metrics in CATEGORY_TO_WOM_BOSSES.values()
-                        for metric in category_metrics
-                        if metric in SUPPORTED_WOM_BOSS_METRICS
-                    }
-                )
-                prefetched_kc_by_metric, prefetch_errors = load_wom_group_metrics_from_file(
-                    str(WOM_CACHE_FILE),
-                    WOM_GROUP_ID,
-                    event_start_date_str,
-                    event_end_date_str,
-                    tuple(prefetch_metrics)
                 )
                 st.caption(
                     f"Cached WOM event range: {event_start_date_str} to {event_end_date_str} "
@@ -665,7 +761,7 @@ def main():
                 else:
                     st.info("No boss categories mapped for Wise Old Man spooned index yet.")
 
-            # TAB 7: RAW DATA
+            # TAB 8: RAW DATA
             with tab_raw:
                 st.write("Cleaned Data (Using 'Awarded Points'):")
                 st.dataframe(df, use_container_width=True)

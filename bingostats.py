@@ -249,7 +249,7 @@ def load_wom_group_metrics_from_file(cache_path, group_id, start_date_str, end_d
         return {}, [f"WOM cache file not found: {file_path.name}"]
 
     try:
-        payload = json.loads(file_path.read_text(encoding="utf-8"))
+        payload = json.loads(file_path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         return {}, [f"Failed to read WOM cache file: {exc}"]
 

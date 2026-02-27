@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 from pathlib import Path
 import time
+import re
 import requests
 
 # --- Page Configuration ---
@@ -13,6 +14,11 @@ WOM_GROUP_ID = 11794
 WOM_COMPETITION_ID = 124486
 WOM_MAX_RETRIES = 5
 WOM_BASE_BACKOFF_SECONDS = 1.5
+WOM_PLAYER_ALIASES = {
+    # CSV player name: Wise Old Man player name
+    # "Stoke024": "Stoke 024",
+    # "Iron Thrage": "SomeWOMName",
+}
 SUPPORTED_WOM_BOSS_METRICS = {
     "abyssal_sire", "alchemical_hydra", "amoxliatl", "araxxor", "artio",
     "barrows_chests", "bryophyta", "callisto", "calvarion", "cerberus",
@@ -99,7 +105,14 @@ def load_and_clean_data(file):
 
 
 def _normalize_name(name):
-    return "".join(str(name or "").strip().lower().split())
+    return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
+
+
+def _resolve_csv_player_to_wom_key(player_name):
+    alias_target = WOM_PLAYER_ALIASES.get(str(player_name).strip())
+    if alias_target:
+        return _normalize_name(alias_target)
+    return _normalize_name(player_name)
 
 
 def _wom_retry_delay_seconds(response, attempt):
@@ -238,9 +251,13 @@ def build_spooned_index(category_df, selected_boss_metrics):
             kc_by_player[normalized_player] = kc_by_player.get(normalized_player, 0.0) + float(gained_value or 0)
 
     rows = []
+    missing_from_wom = []
     for player in sorted(category_df["Player"].dropna().unique()):
         player_points = float(category_df.loc[category_df["Player"] == player, "Points"].sum())
-        player_kc_gain = kc_by_player.get(_normalize_name(player), 0.0)
+        wom_lookup_key = _resolve_csv_player_to_wom_key(player)
+        player_kc_gain = kc_by_player.get(wom_lookup_key, 0.0)
+        if player_kc_gain == 0 and player_points > 0:
+            missing_from_wom.append(str(player))
         spooned_index = (player_points / player_kc_gain) if player_kc_gain > 0 else None
 
         rows.append(
@@ -262,6 +279,15 @@ def build_spooned_index(category_df, selected_boss_metrics):
         na_position="last",
     ).reset_index(drop=True)
     spoon_df.insert(0, "Rank", range(1, len(spoon_df) + 1))
+
+    if missing_from_wom:
+        missing_display = ", ".join(sorted(set(missing_from_wom))[:12])
+        errors.append(
+            "No WOM gained rows for: "
+            + missing_display
+            + ". This can mean zero KC gained in the selected date range or a name mismatch. "
+            + "Use WOM_PLAYER_ALIASES to map CSV names to WOM names."
+        )
 
     return spoon_df, start_date, end_date, errors
 

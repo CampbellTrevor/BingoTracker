@@ -1,0 +1,198 @@
+boss_speeds = {
+    # -- Nightmares --
+    "Nightmare": 11,
+    "Phosani's Nightmare": 9.3,
+    
+    # -- Barrows / Moons --
+    "Barrows Chests": 22,
+    "Lunar Chests": 18,
+    
+    # -- God Wars --
+    "Commander Zilyana": 30,
+    "General Graardor": 31,
+    "Kree'arra": 30,
+    "K'ril Tsutsaroth": 32,
+    
+    # -- Varlamore --
+    "Yama": 18,
+    "The Royal Titans": 55,
+    "Doom of Mokhaiotl": 18,
+    "The Hueycoatl": 9,
+    
+    # -- Minigames --
+    "Tempoross": 24,
+    "Wintertodt": 40,
+    "Zalcano": 30,
+    
+    # -- Raids --
+    "Chambers of Xeric": 3.5,
+    "Chambers of Xeric Challenge Mode": 3,
+    "Tombs of Amascut": 3.7,
+    "Tombs of Amascut Expert": 3,
+    "Theatre of Blood": 3.2,
+    "Theatre of Blood Hard Mode": 3,
+    
+    # -- DT2 --
+    "Vardorvis": 37,
+    "The Leviathan": 27,
+    "Duke Sucellus": 37,
+    "The Whisperer": 21,
+    
+    # -- Slayer Bosses --
+    "Alchemical Hydra": 29,
+    "Cerberus": 54,
+    "Araxxor": 38,
+    "Thermonuclear Smoke Devil": 100,
+    "Abyssal Sire": 44,
+    "Kraken": 90,
+    
+    # -- Other Bosses --
+    "Zulrah": 42,
+    "Vorkath": 34,
+    "Sol Heredit": 2.8, # Colo
+    "TzKal-Zuk": 1,     # Inferno
+    "The Corrupted Gauntlet": 7.2,
+    "Phantom Muspah": 27,
+    "Nex": 15,
+    
+    # -- Wildy --
+    "Artio": 50, "Callisto": 142, 
+    "Calvarion": 45, "Vet'ion": 39, 
+    "Spindel": 50, "Venenatis": 80,
+    "Scorpia": 60, "Chaos Fanatic": 60, "Crazy Archaeologist": 60 # Added for shard completeness
+}
+
+# ==========================================
+# 2. ITEM DATABASE (Points, Rate, Valid Sources)
+# ==========================================
+# format: "Item Name": { "points": X, "rate": Y, "sources": ["Boss1", "Boss2"] }
+# "rate" is the denominator (1/rate)
+
+items_db = {
+    # --- NIGHTMARE ---
+    "Nightmare staff":      { "points": 5, "rate": 320, "sources": ["Nightmare"] }, # PNM rate is different, handled below? logic assumes 1 rate
+    "Any inquisitor piece": { "points": 5, "rate": 320, "sources": ["Nightmare"] },
+    "Inquisitor's mace":    { "points": 5, "rate": 1600, "sources": ["Nightmare"] },
+    "Any orb":              { "points": 7, "rate": 600, "sources": ["Nightmare"] },
+    "Little Nightmare":     { "points": 7, "rate": 2000, "sources": ["Nightmare", "Phosani's Nightmare"] },
+    
+    # --- BARROWS / MOONS ---
+    "Any barrows item":     { "points": 1, "rate": 15, "sources": ["Barrows Chests"] },
+    "Any Moons item":       { "points": 1, "rate": 14, "sources": ["Lunar Chests"] },
+
+    # --- GOD WARS ---
+    "Any godsword shard":   { "points": 1, "rate": 127, "sources": ["Commander Zilyana", "General Graardor", "Kree'arra", "K'ril Tsutsaroth"] },
+    "Saradomin sword":      { "points": 1, "rate": 127, "sources": ["Commander Zilyana"] },
+    "Saradomin Light":      { "points": 1, "rate": 254, "sources": ["Commander Zilyana"] },
+    "Zammy spear":          { "points": 2, "rate": 127, "sources": ["K'ril Tsutsaroth"] },
+    "Armadyl cbow":         { "points": 2, "rate": 508, "sources": ["Commander Zilyana"] },
+    "Staff of the dead":    { "points": 3, "rate": 508, "sources": ["K'ril Tsutsaroth"] },
+    "Any Hilt":             { "points": 5, "rate": 508, "sources": ["Commander Zilyana", "General Graardor", "Kree'arra", "K'ril Tsutsaroth"] },
+    "Any GWD pet":          { "points": 7, "rate": 5000, "sources": ["Commander Zilyana", "General Graardor", "Kree'arra", "K'ril Tsutsaroth"] },
+
+    # --- VARLAMORE (Yama/Titans/Doom) ---
+    "Yama Unique":          { "points": 5, "rate": 300, "sources": ["Yama"] }, 
+    "Yami Pet":             { "points": 7, "rate": 2000, "sources": ["Yama"] },
+    "Giantsoul Amulet":     { "points": 1, "rate": 150, "sources": ["The Royal Titans"] },
+    "Bran Pet":             { "points": 7, "rate": 2000, "sources": ["The Royal Titans"] },
+    "Doom Unique (Cloth)":  { "points": 5, "rate": 300, "sources": ["Doom of Mokhaiotl"] },
+    "Dom Pet":              { "points": 5, "rate": 1500, "sources": ["Doom of Mokhaiotl"] },
+
+    # --- MINIGAMES ---
+    "Abyssal Lantern":      { "points": 5, "rate": 700, "sources": ["Rift Searches"] }, # No speed for this yet, ignored
+    "Tome of Fire":         { "points": 5, "rate": 1000, "sources": ["Wintertodt"] },
+    "Tome of Water":        { "points": 5, "rate": 1600, "sources": ["Tempoross"] },
+    "Dragon Harpoon":       { "points": 5, "rate": 8000, "sources": ["Tempoross"] }, 
+    "Tiny Tempor":          { "points": 5, "rate": 8000, "sources": ["Tempoross"] },
+    "Phoenix":              { "points": 5, "rate": 5000, "sources": ["Wintertodt"] },
+
+    # --- CHAMBERS OF XERIC ---
+    "Dexterous Prayer Scroll": { "points": 1, "rate": 29, "sources": ["Chambers of Xeric"] },
+    "Arcane Prayer Scroll":    { "points": 1, "rate": 29, "sources": ["Chambers of Xeric"] },
+    "Twisted Buckler":         { "points": 2, "rate": 172, "sources": ["Chambers of Xeric"] },
+    "Dinh's bulwark":          { "points": 3, "rate": 172, "sources": ["Chambers of Xeric"] },
+    "Dragon Claws":            { "points": 3, "rate": 172, "sources": ["Chambers of Xeric"] },
+    "Mega rares (Tbow/Kodai/Maul)": { "points": 7, "rate": 570, "sources": ["Chambers of Xeric"] },
+    "Olmlet":                  { "points": 7, "rate": 1750, "sources": ["Chambers of Xeric"] },
+
+    # --- DT2 BOSSES ---
+    "Any quartz":           { "points": 1, "rate": 200, "sources": ["Vardorvis", "The Leviathan", "Duke Sucellus", "The Whisperer"] },
+    "Chromium ingot":       { "points": 3, "rate": 450, "sources": ["Vardorvis", "The Leviathan", "Duke Sucellus", "The Whisperer"] },
+    "Any virtus piece":     { "points": 5, "rate": 750, "sources": ["Vardorvis", "The Leviathan", "Duke Sucellus", "The Whisperer"] },
+
+
+    # --- SLAYER BOSSES ---
+    "Unsired":              { "points": 1, "rate": 100, "sources": ["Abyssal Sire"] },
+    "Cerberus Crystal":     { "points": 3, "rate": 128, "sources": ["Cerberus"] },
+    "Araxyte fang":         { "points": 5, "rate": 600, "sources": ["Araxxor"] },
+    "Hydra Claw":           { "points": 5, "rate": 1000, "sources": ["Alchemical Hydra"] },
+    "Hydra Leather":        { "points": 7, "rate": 514, "sources": ["Alchemical Hydra"] },
+    "Smoke Devil Pet":      { "points": 7, "rate": 3000, "sources": ["Thermonuclear Smoke Devil"] },
+    "Kraken Pet":           { "points": 7, "rate": 3000, "sources": ["Kraken"] },
+
+    # --- ZULRAH ---
+    "Any Zulrah Unique":    { "points": 2, "rate": 128, "sources": ["Zulrah"] },
+    "Tanzanite fang":       { "points": 2, "rate": 512, "sources": ["Zulrah"] },
+    "Magic fang":           { "points": 2, "rate": 512, "sources": ["Zulrah"] },
+    "Pet Snakeling":        { "points": 7, "rate": 4000, "sources": ["Zulrah"] },
+
+    # --- WILDY SHIELDS / REVS ---
+    "Odium/Malediction Shard": { "points": 2, "rate": 256, "sources": ["Scorpia", "Chaos Fanatic", "Crazy Archaeologist"] }, 
+    "Any wildy weapon":     { "points": 5, "rate": 5333, "sources": ["Revenants"] }, # Placeholder for Revs (rate varies heavily)
+
+    # --- COLO / INFERNO ---
+    "Quiver":               { "points": 1, "rate": 1, "sources": ["Sol Heredit"] },
+    "Infernal Cape":        { "points": 1, "rate": 1, "sources": ["TzKal-Zuk"] },
+    "Smol Heredit":         { "points": 7, "rate": 200, "sources": ["Sol Heredit"] },
+    "Jal-Nib-Rek":          { "points": 7, "rate": 100, "sources": ["TzKal-Zuk"] },
+
+    # --- SHARD TILE (CG/Muspah) ---
+    "Venator Shard":        { "points": 2, "rate": 100, "sources": ["Phantom Muspah"] },
+    "Armour/Weapon Seed":   { "points": 2, "rate": 50, "sources": ["The Corrupted Gauntlet"] },
+    "Enhanced Crystal Wep": { "points": 5, "rate": 400, "sources": ["The Corrupted Gauntlet"] },
+    "Youngllef":            { "points": 7, "rate": 800, "sources": ["The Corrupted Gauntlet"] },
+    "Muphin":               { "points": 7, "rate": 2500, "sources": ["Phantom Muspah"] },
+
+    # --- DAG KINGS ---
+    "Dragon Axe":           { "points": 1, "rate": 128, "sources": ["Dagannoth Prime", "Dagannoth Rex", "Dagannoth Supreme"] },
+    "Berserker Ring":       { "points": 1, "rate": 128, "sources": ["Dagannoth Rex"] },
+    "Archers Ring":         { "points": 1, "rate": 128, "sources": ["Dagannoth Supreme"] },
+    "Seers Ring":           { "points": 1, "rate": 128, "sources": ["Dagannoth Prime"] },
+    "DKS Pet":              { "points": 7, "rate": 5000, "sources": ["Dagannoth Prime", "Dagannoth Rex", "Dagannoth Supreme"] },
+
+    # --- TOMBS OF AMASCUT ---
+    "Osmumten's fang":      { "points": 1, "rate": 29, "sources": ["Tombs of Amascut"] }, # Rate depends highly on invo
+    "Lightbearer":          { "points": 1, "rate": 29, "sources": ["Tombs of Amascut"] },
+    "Tumeken's Shadow":     { "points": 7, "rate": 1200, "sources": ["Tombs of Amascut"] },
+
+    # --- DRAGONS ---
+    "Vorkath Head":         { "points": 1, "rate": 50, "sources": ["Vorkath"] },
+    "Hueycoatl hide":       { "points": 1, "rate": 150, "sources": ["The Hueycoatl"] },
+    "Tome of Earth":        { "points": 1, "rate": 150, "sources": ["The Hueycoatl"] },
+    "Draconic Visage":      { "points": 5, "rate": 5000, "sources": ["Vorkath"] }, # Rare from Vorkath
+    "Vorki":                { "points": 7, "rate": 3000, "sources": ["Vorkath"] },
+    "Huberte":              { "points": 7, "rate": 3000, "sources": ["The Hueycoatl"] },
+
+    # --- THEATRE OF BLOOD ---
+    "Avernic Defender Hilt":{ "points": 2, "rate": 23, "sources": ["Theatre of Blood"] },
+    "Ghrazi Rapier":        { "points": 3, "rate": 86, "sources": ["Theatre of Blood"] },
+    "Scythe of Vitur":      { "points": 7, "rate": 172, "sources": ["Theatre of Blood"] },
+
+    # --- ZALCANO ---
+    "Crystal Tool Seed":    { "points": 2, "rate": 200, "sources": ["Zalcano"] },
+    "Zalcano Shard":        { "points": 3, "rate": 1500, "sources": ["Zalcano"] },
+    "Smolcano":             { "points": 7, "rate": 2250, "sources": ["Zalcano"] },
+
+    # --- NEX ---
+    "Zaryte Vambraces":     { "points": 5, "rate": 172, "sources": ["Nex"] },
+    "Nihil Horn":           { "points": 5, "rate": 258, "sources": ["Nex"] },
+    "Torva Piece":          { "points": 5, "rate": 86, "sources": ["Nex"] },
+    "Nexling":              { "points": 7, "rate": 500, "sources": ["Nex"] },
+    
+    # --- WILDY BOSSES (BEAR/SPIDER/SKELETON) ---
+    "Dragon Pickaxe":       { "points": 2, "rate": 256, "sources": ["Artio", "Callisto", "Calvarion", "Vet'ion", "Spindel", "Venenatis"] },
+    "Voidwaker Piece":      { "points": 3, "rate": 358, "sources": ["Artio", "Callisto", "Calvarion", "Vet'ion", "Spindel", "Venenatis"] },
+    "Vet'ion Jr":           { "points": 7, "rate": 2000, "sources": ["Vet'ion", "Calvarion"] },
+    "Callisto Cub":         { "points": 7, "rate": 2000, "sources": ["Callisto", "Artio"] },
+    "Venenatis Spiderling": { "points": 7, "rate": 2000, "sources": ["Venenatis", "Spindel"] },
+}

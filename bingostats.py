@@ -322,7 +322,16 @@ def load_wom_group_metrics_from_file(cache_path, group_id, start_date_str, end_d
 
     if file_group_id != group_id:
         notes.append(f"WOM cache group_id mismatch (file={file_group_id}, app={group_id})")
-    if file_start != start_date_str or file_end != end_date_str:
+    try:
+        app_start = pd.to_datetime(start_date_str).date()
+        app_end = pd.to_datetime(end_date_str).date()
+        cache_start = pd.to_datetime(file_start).date() if file_start else None
+        cache_end = pd.to_datetime(file_end).date() if file_end else None
+        if cache_start is None or cache_end is None or not (cache_start <= app_start and cache_end >= app_end):
+            notes.append(
+                f"WOM cache date range mismatch (file={file_start}..{file_end}, app={start_date_str}..{end_date_str})"
+            )
+    except Exception:
         notes.append(
             f"WOM cache date range mismatch (file={file_start}..{file_end}, app={start_date_str}..{end_date_str})"
         )

@@ -2,13 +2,17 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from pathlib import Path
-from urllib.parse import quote
+import time
 import requests
 
 # --- Page Configuration ---
 st.set_page_config(page_title="OSRS Bingo Tracker", layout="wide", page_icon="⚔️")
 DEFAULT_CSV_PATH = Path("Copy of Copy of Winter Bingo 2026 - Event Log - New Log.csv")
 WOM_API_BASE_URL = "https://api.wiseoldman.net/v2"
+WOM_GROUP_ID = 11794
+WOM_COMPETITION_ID = 124486
+WOM_MAX_RETRIES = 5
+WOM_BASE_BACKOFF_SECONDS = 1.5
 
 # Maps bingo categories to Wise Old Man boss metrics for KC gains.
 CATEGORY_TO_WOM_BOSSES = {
@@ -84,25 +88,114 @@ def _wom_value(metric_payload):
     return float(metric_payload or 0)
 
 
+def _normalize_name(name):
+    return "".join(str(name or "").strip().lower().split())
+
+
+def _wom_retry_delay_seconds(response, attempt):
+    retry_after = response.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(float(retry_after), WOM_BASE_BACKOFF_SECONDS)
+        except ValueError:
+            pass
+    return WOM_BASE_BACKOFF_SECONDS * attempt
+
+
+def _extract_player_name_from_row(row):
+    if not isinstance(row, dict):
+        return None
+
+    direct = row.get("username") or row.get("displayName") or row.get("name")
+    if direct:
+        return str(direct)
+
+    player_obj = row.get("player") or row.get("member")
+    if isinstance(player_obj, dict):
+        nested = (
+            player_obj.get("username")
+            or player_obj.get("displayName")
+            or player_obj.get("name")
+        )
+        if nested:
+            return str(nested)
+    return None
+
+
+def _extract_rows_from_group_response(response_json):
+    if isinstance(response_json, list):
+        return response_json
+    if not isinstance(response_json, dict):
+        return []
+
+    data = response_json.get("data")
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("records", "entries", "results", "members", "leaderboard"):
+            candidate = data.get(key)
+            if isinstance(candidate, list):
+                return candidate
+    for key in ("records", "entries", "results", "members", "leaderboard"):
+        candidate = response_json.get(key)
+        if isinstance(candidate, list):
+            return candidate
+    return []
+
+
 @st.cache_data(ttl=21600)
-def fetch_wom_boss_gains(player_name, start_date_str, end_date_str):
-    encoded_player = quote(str(player_name).strip(), safe="")
-    url = f"{WOM_API_BASE_URL}/players/{encoded_player}/gained"
-    params = {"startDate": start_date_str, "endDate": end_date_str}
+def _fetch_wom_group_metric_success(group_id, metric_name, start_date_str, end_date_str):
+    url = f"{WOM_API_BASE_URL}/groups/{group_id}/gained"
+    params = {"metric": metric_name, "startDate": start_date_str, "endDate": end_date_str}
 
-    try:
-        response = requests.get(url, params=params, timeout=20)
-        if response.status_code == 404:
-            return {}, "Player not found on Wise Old Man"
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        return {}, f"Wise Old Man request failed: {exc}"
+    response = requests.get(url, params=params, timeout=20)
+    if response.status_code == 404:
+        return {}, f"Group {group_id} not found on Wise Old Man"
+    response.raise_for_status()
 
-    payload = response.json().get("data", {})
-    boss_gains = payload.get("bosses", {})
-    if not isinstance(boss_gains, dict):
-        return {}, "No boss gain data returned"
-    return boss_gains, None
+    rows = _extract_rows_from_group_response(response.json())
+    gains_by_player = {}
+    for row in rows:
+        player_name = _extract_player_name_from_row(row)
+        if not player_name:
+            continue
+
+        gained_value = row.get("gained")
+        if gained_value is None and isinstance(row.get("data"), dict):
+            gained_value = row["data"].get("gained")
+        if gained_value is None and isinstance(row.get("metric"), dict):
+            gained_value = row["metric"].get("gained")
+
+        gains_by_player[_normalize_name(player_name)] = float(gained_value or 0)
+
+    return gains_by_player, None
+
+
+def fetch_wom_group_metric(group_id, metric_name, start_date_str, end_date_str):
+    url = f"{WOM_API_BASE_URL}/groups/{group_id}/gained"
+    params = {"metric": metric_name, "startDate": start_date_str, "endDate": end_date_str}
+
+    for attempt in range(1, WOM_MAX_RETRIES + 1):
+        try:
+            return _fetch_wom_group_metric_success(group_id, metric_name, start_date_str, end_date_str)
+        except requests.HTTPError as exc:
+            response = exc.response
+            if response is not None and response.status_code == 429 and attempt < WOM_MAX_RETRIES:
+                time.sleep(_wom_retry_delay_seconds(response, attempt))
+                continue
+            if response is not None and response.status_code == 429:
+                return {}, (
+                    f"Rate limited by Wise Old Man after {WOM_MAX_RETRIES} retries "
+                    f"for {url}?metric={params['metric']}&startDate={params['startDate']}&endDate={params['endDate']}"
+                )
+            return {}, f"Wise Old Man request failed: {exc}"
+        except requests.RequestException as exc:
+            if attempt < WOM_MAX_RETRIES:
+                time.sleep(WOM_BASE_BACKOFF_SECONDS * attempt)
+                continue
+            return {}, f"Wise Old Man request failed: {exc}"
+
+    return {}, "Wise Old Man request failed after retries"
 
 
 def build_spooned_index(category_df, selected_boss_metrics):
@@ -115,21 +208,32 @@ def build_spooned_index(category_df, selected_boss_metrics):
     end_date_str = end_date.strftime("%Y-%m-%d")
     errors = []
 
+    kc_by_player = {}
+    for metric_name in selected_boss_metrics:
+        metric_gains, error_msg = fetch_wom_group_metric(
+            WOM_GROUP_ID,
+            metric_name,
+            start_date_str,
+            end_date_str
+        )
+        if error_msg:
+            errors.append(f"{metric_name}: {error_msg}")
+            continue
+
+        for normalized_player, gained_value in metric_gains.items():
+            kc_by_player[normalized_player] = kc_by_player.get(normalized_player, 0.0) + float(gained_value or 0)
+
     rows = []
     for player in sorted(category_df["Player"].dropna().unique()):
         player_points = float(category_df.loc[category_df["Player"] == player, "Points"].sum())
-        boss_gains, error_msg = fetch_wom_boss_gains(player, start_date_str, end_date_str)
-        if error_msg:
-            errors.append(f"{player}: {error_msg}")
-
-        kc_gain = sum(_wom_value(boss_gains.get(metric_name, 0)) for metric_name in selected_boss_metrics)
-        spooned_index = (player_points / kc_gain) if kc_gain > 0 else None
+        player_kc_gain = kc_by_player.get(_normalize_name(player), 0.0)
+        spooned_index = (player_points / player_kc_gain) if player_kc_gain > 0 else None
 
         rows.append(
             {
                 "Player": player,
                 "Points": round(player_points, 2),
-                "KC Gain": round(kc_gain, 2),
+                "KC Gain": round(player_kc_gain, 2),
                 "Spooned Index": round(spooned_index, 3) if spooned_index is not None else None,
             }
         )
@@ -354,6 +458,10 @@ def main():
             # TAB 6: SPOONED INDEX
             with tab_spooned:
                 st.subheader("Biggest Spoons by Boss KC Gain")
+                st.caption(
+                    f"Using Wise Old Man group pulls (group {WOM_GROUP_ID}, competition ref {WOM_COMPETITION_ID}) "
+                    "to reduce API requests."
+                )
                 available_spoon_categories = sorted(
                     [cat for cat in df["Category"].dropna().unique() if cat in CATEGORY_TO_WOM_BOSSES]
                 )
@@ -398,7 +506,7 @@ def main():
 
                     if fetch_errors:
                         st.warning(
-                            "Some Wise Old Man lookups failed. Results may be incomplete.\n"
+                            "Some Wise Old Man metric pulls still failed after automatic retries. Results may be incomplete.\n"
                             + "\n".join(fetch_errors[:8])
                         )
                 else:

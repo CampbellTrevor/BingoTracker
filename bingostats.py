@@ -13,15 +13,31 @@ WOM_GROUP_ID = 11794
 WOM_COMPETITION_ID = 124486
 WOM_MAX_RETRIES = 5
 WOM_BASE_BACKOFF_SECONDS = 1.5
+SUPPORTED_WOM_BOSS_METRICS = {
+    "abyssal_sire", "alchemical_hydra", "amoxliatl", "araxxor", "artio",
+    "barrows_chests", "bryophyta", "callisto", "calvarion", "cerberus",
+    "chambers_of_xeric", "chambers_of_xeric_challenge_mode", "chaos_elemental",
+    "chaos_fanatic", "commander_zilyana", "corporeal_beast", "crazy_archaeologist",
+    "dagannoth_prime", "dagannoth_rex", "dagannoth_supreme", "deranged_archaeologist",
+    "doom_of_mokhaiotl", "duke_sucellus", "general_graardor", "giant_mole",
+    "grotesque_guardians", "hespori", "kalphite_queen", "king_black_dragon",
+    "kraken", "kreearra", "kril_tsutsaroth", "lunar_chests", "mimic",
+    "nex", "nightmare", "obor", "phosanis_nightmare", "royal_titans",
+    "scorpia", "skotizo", "sol_heredit", "spindel", "tempoross", "the_hueycoatl",
+    "the_leviathan", "the_royal_titans", "the_whisperer", "theatre_of_blood",
+    "theatre_of_blood_hard_mode", "thermonuclear_smoke_devil", "tombs_of_amascut",
+    "tombs_of_amascut_expert", "tzkal_zuk", "tztok_jad", "vardorvis",
+    "venenatis", "vetion", "vorkath", "wintertodt", "yama", "zalcano", "zulrah",
+}
 
 # Maps bingo categories to Wise Old Man boss metrics for KC gains.
 CATEGORY_TO_WOM_BOSSES = {
     "Dagannoth Kings": ["dagannoth_prime", "dagannoth_rex", "dagannoth_supreme"],
-    "Barrows / Moons": ["barrows_chests", "blue_moon", "blood_moon", "eclipse_moon"],
-    "Dragons": ["vorkath", "king_black_dragon", "rune_dragon"],
-    "God Wars Dungeon": ["general_graardor", "kree_arra", "commander_zilyana", "kril_tsutsaroth", "nex"],
-    "Royal Titans": ["royal_titans"],
-    "Tormented / Demonics": ["tormented_demons"],
+    "Barrows / Moons": ["barrows_chests", "lunar_chests"],
+    "Dragons": ["vorkath", "king_black_dragon"],
+    "God Wars Dungeon": ["general_graardor", "kreearra", "commander_zilyana", "kril_tsutsaroth", "nex"],
+    "Royal Titans": ["the_royal_titans"],
+    "Tormented / Demonics": [],
     "Colo / Inferno": ["tzkal_zuk", "sol_heredit"],
     "DT2 Bosses": ["duke_sucellus", "the_leviathan", "the_whisperer", "vardorvis"],
     "Spider / Bear / Skeleton": ["callisto", "artio", "vetion", "calvarion", "venenatis", "spindel"],
@@ -80,12 +96,6 @@ def load_and_clean_data(file):
     except Exception as e:
         st.error(f"Error processing file: {e}")
         return pd.DataFrame()
-
-
-def _wom_value(metric_payload):
-    if isinstance(metric_payload, dict):
-        return float(metric_payload.get("value") or 0)
-    return float(metric_payload or 0)
 
 
 def _normalize_name(name):
@@ -207,9 +217,13 @@ def build_spooned_index(category_df, selected_boss_metrics):
     start_date_str = start_date.strftime("%Y-%m-%d")
     end_date_str = end_date.strftime("%Y-%m-%d")
     errors = []
+    valid_metrics = [m for m in selected_boss_metrics if m in SUPPORTED_WOM_BOSS_METRICS]
+    unsupported_metrics = sorted(set(selected_boss_metrics) - set(valid_metrics))
+    if unsupported_metrics:
+        errors.append("Unsupported WOM metrics skipped: " + ", ".join(unsupported_metrics))
 
     kc_by_player = {}
-    for metric_name in selected_boss_metrics:
+    for metric_name in valid_metrics:
         metric_gains, error_msg = fetch_wom_group_metric(
             WOM_GROUP_ID,
             metric_name,

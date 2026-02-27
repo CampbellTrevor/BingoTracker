@@ -222,14 +222,30 @@ def fetch_wom_group_metric(group_id, metric_name, start_date_str, end_date_str):
     return {}, "Wise Old Man request failed after retries"
 
 
-def build_spooned_index(category_df, selected_boss_metrics):
+@st.cache_data(ttl=21600)
+def prefetch_wom_group_metrics_bundle(group_id, metrics, start_date_str, end_date_str):
+    kc_by_metric = {}
+    errors = []
+    for metric_name in sorted(set(metrics)):
+        metric_gains, error_msg = fetch_wom_group_metric(
+            group_id,
+            metric_name,
+            start_date_str,
+            end_date_str
+        )
+        if error_msg:
+            errors.append(f"{metric_name}: {error_msg}")
+            continue
+        kc_by_metric[metric_name] = metric_gains
+    return kc_by_metric, errors
+
+
+def build_spooned_index(category_df, selected_boss_metrics, prefetched_kc_by_metric):
     if category_df.empty:
         return pd.DataFrame(), None, None, []
 
     start_date = category_df["Date"].min()
     end_date = category_df["Date"].max()
-    start_date_str = start_date.strftime("%Y-%m-%d")
-    end_date_str = end_date.strftime("%Y-%m-%d")
     errors = []
     valid_metrics = [m for m in selected_boss_metrics if m in SUPPORTED_WOM_BOSS_METRICS]
     unsupported_metrics = sorted(set(selected_boss_metrics) - set(valid_metrics))
@@ -238,15 +254,7 @@ def build_spooned_index(category_df, selected_boss_metrics):
 
     kc_by_player = {}
     for metric_name in valid_metrics:
-        metric_gains, error_msg = fetch_wom_group_metric(
-            WOM_GROUP_ID,
-            metric_name,
-            start_date_str,
-            end_date_str
-        )
-        if error_msg:
-            errors.append(f"{metric_name}: {error_msg}")
-            continue
+        metric_gains = prefetched_kc_by_metric.get(metric_name, {})
 
         for normalized_player, gained_value in metric_gains.items():
             kc_by_player[normalized_player] = kc_by_player.get(normalized_player, 0.0) + float(gained_value or 0)
@@ -512,7 +520,29 @@ def main():
                 st.subheader("Biggest Spoons by Boss KC Gain")
                 st.caption(
                     f"Using Wise Old Man group pulls (group {WOM_GROUP_ID}, competition ref {WOM_COMPETITION_ID}) "
-                    "to reduce API requests."
+                    "with cached prefetch to reduce API requests."
+                )
+                event_start_date = df["Date"].min()
+                event_end_date = df["Date"].max()
+                event_start_date_str = event_start_date.strftime("%Y-%m-%d")
+                event_end_date_str = event_end_date.strftime("%Y-%m-%d")
+                prefetch_metrics = sorted(
+                    {
+                        metric
+                        for category_metrics in CATEGORY_TO_WOM_BOSSES.values()
+                        for metric in category_metrics
+                        if metric in SUPPORTED_WOM_BOSS_METRICS
+                    }
+                )
+                prefetched_kc_by_metric, prefetch_errors = prefetch_wom_group_metrics_bundle(
+                    WOM_GROUP_ID,
+                    tuple(prefetch_metrics),
+                    event_start_date_str,
+                    event_end_date_str
+                )
+                st.caption(
+                    f"Cached WOM event range: {event_start_date_str} to {event_end_date_str} "
+                    f"({len(prefetch_metrics)} metrics)"
                 )
                 available_spoon_categories = sorted(
                     [cat for cat in df["Category"].dropna().unique() if cat in CATEGORY_TO_WOM_BOSSES]
@@ -529,7 +559,8 @@ def main():
                     spoon_category_df = df[df["Category"] == selected_spoon_category].copy()
                     spoon_df, start_date, end_date, fetch_errors = build_spooned_index(
                         spoon_category_df,
-                        selected_metrics
+                        selected_metrics,
+                        prefetched_kc_by_metric
                     )
 
                     if start_date is not None and end_date is not None:
@@ -556,9 +587,10 @@ def main():
                     else:
                         st.info("No spooned index rows were generated for this category.")
 
-                    if fetch_errors:
+                    all_wom_notes = prefetch_errors + fetch_errors
+                    if all_wom_notes:
                         request_failures = [
-                            e for e in fetch_errors
+                            e for e in all_wom_notes
                             if "request failed" in e.lower() or "rate limited" in e.lower()
                         ]
                         warning_title = (
@@ -568,7 +600,7 @@ def main():
                         )
                         st.warning(
                             warning_title
-                            + "\n".join(fetch_errors[:8])
+                            + "\n".join(all_wom_notes[:10])
                         )
                 else:
                     st.info("No boss categories mapped for Wise Old Man spooned index yet.")

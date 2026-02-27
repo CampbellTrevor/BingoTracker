@@ -223,6 +223,34 @@ def main():
                         hide_index=True,
                         use_container_width=True
                     )
+
+                    st.divider()
+                    st.subheader(f"{selected_team} Category Points Breakdown")
+
+                    team_category_points_df = (
+                        df[df['Team'] == selected_team]
+                        .groupby('Category', as_index=False)['Points']
+                        .sum()
+                        .sort_values('Points', ascending=False)
+                    )
+                    team_category_points_df.insert(0, "Rank", range(1, len(team_category_points_df) + 1))
+
+                    fig_team_categories = px.bar(
+                        team_category_points_df,
+                        x='Points',
+                        y='Category',
+                        orientation='h',
+                        text='Points',
+                        color='Points',
+                        title=f"{selected_team}: Points by Category"
+                    )
+                    fig_team_categories.update_layout(yaxis={'categoryorder': 'total ascending'})
+                    st.plotly_chart(fig_team_categories, use_container_width=True)
+                    st.dataframe(
+                        team_category_points_df[['Rank', 'Category', 'Points']],
+                        hide_index=True,
+                        use_container_width=True
+                    )
                 else:
                     st.info("No teams found in the uploaded data.")
 

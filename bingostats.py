@@ -2,10 +2,36 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from pathlib import Path
+from urllib.parse import quote
+import requests
 
 # --- Page Configuration ---
 st.set_page_config(page_title="OSRS Bingo Tracker", layout="wide", page_icon="⚔️")
 DEFAULT_CSV_PATH = Path("Copy of Copy of Winter Bingo 2026 - Event Log - New Log.csv")
+WOM_API_BASE_URL = "https://api.wiseoldman.net/v2"
+
+# Maps bingo categories to Wise Old Man boss metrics for KC gains.
+CATEGORY_TO_WOM_BOSSES = {
+    "Dagannoth Kings": ["dagannoth_prime", "dagannoth_rex", "dagannoth_supreme"],
+    "Barrows / Moons": ["barrows_chests", "blue_moon", "blood_moon", "eclipse_moon"],
+    "Dragons": ["vorkath", "king_black_dragon", "rune_dragon"],
+    "God Wars Dungeon": ["general_graardor", "kree_arra", "commander_zilyana", "kril_tsutsaroth", "nex"],
+    "Royal Titans": ["royal_titans"],
+    "Tormented / Demonics": ["tormented_demons"],
+    "Colo / Inferno": ["tzkal_zuk", "sol_heredit"],
+    "DT2 Bosses": ["duke_sucellus", "the_leviathan", "the_whisperer", "vardorvis"],
+    "Spider / Bear / Skeleton": ["callisto", "artio", "vetion", "calvarion", "venenatis", "spindel"],
+    "Slayer Bosses": ["abyssal_sire", "alchemical_hydra", "cerberus", "grotesque_guardians", "kraken", "thermonuclear_smoke_devil"],
+    "Zulrah": ["zulrah"],
+    "Chambers of Xeric": ["chambers_of_xeric", "chambers_of_xeric_challenge_mode"],
+    "Tombs of Amascut": ["tombs_of_amascut", "tombs_of_amascut_expert"],
+    "Doom of Mokhaiotl": ["doom_of_mokhaiotl"],
+    "Nex": ["nex"],
+    "Yama": ["yama"],
+    "Nightmare / PNM": ["nightmare", "phosanis_nightmare"],
+    "Theatre of Blood": ["theatre_of_blood", "theatre_of_blood_hard_mode"],
+    "Zalcano": ["zalcano"],
+}
 
 # --- 1. Data Cleaning Engine ---
 @st.cache_data
@@ -51,6 +77,76 @@ def load_and_clean_data(file):
         st.error(f"Error processing file: {e}")
         return pd.DataFrame()
 
+
+def _wom_value(metric_payload):
+    if isinstance(metric_payload, dict):
+        return float(metric_payload.get("value") or 0)
+    return float(metric_payload or 0)
+
+
+@st.cache_data(ttl=21600)
+def fetch_wom_boss_gains(player_name, start_date_str, end_date_str):
+    encoded_player = quote(str(player_name).strip(), safe="")
+    url = f"{WOM_API_BASE_URL}/players/{encoded_player}/gained"
+    params = {"startDate": start_date_str, "endDate": end_date_str}
+
+    try:
+        response = requests.get(url, params=params, timeout=20)
+        if response.status_code == 404:
+            return {}, "Player not found on Wise Old Man"
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        return {}, f"Wise Old Man request failed: {exc}"
+
+    payload = response.json().get("data", {})
+    boss_gains = payload.get("bosses", {})
+    if not isinstance(boss_gains, dict):
+        return {}, "No boss gain data returned"
+    return boss_gains, None
+
+
+def build_spooned_index(category_df, selected_boss_metrics):
+    if category_df.empty:
+        return pd.DataFrame(), None, None, []
+
+    start_date = category_df["Date"].min()
+    end_date = category_df["Date"].max()
+    start_date_str = start_date.strftime("%Y-%m-%d")
+    end_date_str = end_date.strftime("%Y-%m-%d")
+    errors = []
+
+    rows = []
+    for player in sorted(category_df["Player"].dropna().unique()):
+        player_points = float(category_df.loc[category_df["Player"] == player, "Points"].sum())
+        boss_gains, error_msg = fetch_wom_boss_gains(player, start_date_str, end_date_str)
+        if error_msg:
+            errors.append(f"{player}: {error_msg}")
+
+        kc_gain = sum(_wom_value(boss_gains.get(metric_name, 0)) for metric_name in selected_boss_metrics)
+        spooned_index = (player_points / kc_gain) if kc_gain > 0 else None
+
+        rows.append(
+            {
+                "Player": player,
+                "Points": round(player_points, 2),
+                "KC Gain": round(kc_gain, 2),
+                "Spooned Index": round(spooned_index, 3) if spooned_index is not None else None,
+            }
+        )
+
+    spoon_df = pd.DataFrame(rows)
+    if spoon_df.empty:
+        return spoon_df, start_date, end_date, errors
+
+    spoon_df = spoon_df.sort_values(
+        by=["Spooned Index", "Points"],
+        ascending=[False, False],
+        na_position="last",
+    ).reset_index(drop=True)
+    spoon_df.insert(0, "Rank", range(1, len(spoon_df) + 1))
+
+    return spoon_df, start_date, end_date, errors
+
 # --- 2. App Interface ---
 def main():
     st.title("⚔️ OSRS Bingo Event Tracker")
@@ -87,12 +183,13 @@ def main():
             st.divider()
 
             # --- TABS ---
-            tab_leader, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_raw = st.tabs([
+            tab_leader, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_spooned, tab_raw = st.tabs([
                 "🏆 Leaderboards",
                 "📦 Item Stats",
                 "🔍 Individual Search",
                 "📊 Player Rankings",
                 "👥 Team Rankings",
+                "🥄 Spooned Index",
                 "💾 Cleaned Data"
             ])
 
@@ -254,7 +351,60 @@ def main():
                 else:
                     st.info("No teams found in the uploaded data.")
 
-            # TAB 6: RAW DATA
+            # TAB 6: SPOONED INDEX
+            with tab_spooned:
+                st.subheader("Biggest Spoons by Boss KC Gain")
+                available_spoon_categories = sorted(
+                    [cat for cat in df["Category"].dropna().unique() if cat in CATEGORY_TO_WOM_BOSSES]
+                )
+
+                if available_spoon_categories:
+                    selected_spoon_category = st.selectbox(
+                        "Choose a Boss Category",
+                        available_spoon_categories,
+                        key="spoon_category"
+                    )
+                    selected_metrics = CATEGORY_TO_WOM_BOSSES[selected_spoon_category]
+
+                    spoon_category_df = df[df["Category"] == selected_spoon_category].copy()
+                    spoon_df, start_date, end_date, fetch_errors = build_spooned_index(
+                        spoon_category_df,
+                        selected_metrics
+                    )
+
+                    if start_date is not None and end_date is not None:
+                        st.caption(
+                            f"Wise Old Man KC range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+                        )
+
+                    if not spoon_df.empty:
+                        display_df = spoon_df.copy()
+                        display_df["Spooned Index"] = display_df["Spooned Index"].fillna(0)
+
+                        fig_spoon = px.bar(
+                            display_df.head(15),
+                            x="Spooned Index",
+                            y="Player",
+                            orientation="h",
+                            text="Spooned Index",
+                            color="Spooned Index",
+                            title=f"Top Spoons - {selected_spoon_category}"
+                        )
+                        fig_spoon.update_layout(yaxis={"categoryorder": "total ascending"})
+                        st.plotly_chart(fig_spoon, use_container_width=True)
+                        st.dataframe(spoon_df, hide_index=True, use_container_width=True)
+                    else:
+                        st.info("No spooned index rows were generated for this category.")
+
+                    if fetch_errors:
+                        st.warning(
+                            "Some Wise Old Man lookups failed. Results may be incomplete.\n"
+                            + "\n".join(fetch_errors[:8])
+                        )
+                else:
+                    st.info("No boss categories mapped for Wise Old Man spooned index yet.")
+
+            # TAB 7: RAW DATA
             with tab_raw:
                 st.write("Cleaned Data (Using 'Awarded Points'):")
                 st.dataframe(df, use_container_width=True)

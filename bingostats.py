@@ -363,18 +363,12 @@ def build_spooned_index(category_df, selected_boss_metrics, prefetched_kc_by_met
 
 # --- 2. App Interface ---
 def main():
-    st.title("⚔️ OSRS Bingo Event Tracker")
     st.markdown("### Winter Bingo 2026 Dashboard")
     
     # Sidebar
     with st.sidebar:
         st.header("Data Source")
         uploaded_file = st.file_uploader("Optional: Upload a replacement CSV", type=['csv'])
-        if DEFAULT_CSV_PATH.exists():
-            st.caption(f"Using bundled data by default: {DEFAULT_CSV_PATH.name}")
-        else:
-            st.caption("Bundled CSV not found. Upload a CSV to continue.")
-        st.caption("Now using 'Awarded Points' for accurate scoring.")
 
     data_source = uploaded_file if uploaded_file is not None else (DEFAULT_CSV_PATH if DEFAULT_CSV_PATH.exists() else None)
 

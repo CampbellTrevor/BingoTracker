@@ -4,11 +4,13 @@ import plotly.express as px
 from pathlib import Path
 import time
 import re
+import json
 import requests
 
 # --- Page Configuration ---
 st.set_page_config(page_title="OSRS Bingo Tracker", layout="wide", page_icon="⚔️")
 DEFAULT_CSV_PATH = Path("Copy of Copy of Winter Bingo 2026 - Event Log - New Log.csv")
+WOM_CACHE_FILE = Path("wom_group_cache.json")
 WOM_API_BASE_URL = "https://api.wiseoldman.net/v2"
 WOM_GROUP_ID = 11794
 WOM_COMPETITION_ID = 124486
@@ -238,6 +240,51 @@ def prefetch_wom_group_metrics_bundle(group_id, metrics, start_date_str, end_dat
             continue
         kc_by_metric[metric_name] = metric_gains
     return kc_by_metric, errors
+
+
+@st.cache_data(ttl=300)
+def load_wom_group_metrics_from_file(cache_path, group_id, start_date_str, end_date_str, metrics):
+    file_path = Path(cache_path)
+    if not file_path.exists():
+        return {}, [f"WOM cache file not found: {file_path.name}"]
+
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {}, [f"Failed to read WOM cache file: {exc}"]
+
+    notes = []
+    file_group_id = payload.get("group_id")
+    file_start = payload.get("start_date")
+    file_end = payload.get("end_date")
+    file_metrics = payload.get("metrics", {})
+
+    if file_group_id != group_id:
+        notes.append(f"WOM cache group_id mismatch (file={file_group_id}, app={group_id})")
+    if file_start != start_date_str or file_end != end_date_str:
+        notes.append(
+            f"WOM cache date range mismatch (file={file_start}..{file_end}, app={start_date_str}..{end_date_str})"
+        )
+    if not isinstance(file_metrics, dict):
+        return {}, notes + ["WOM cache format invalid: metrics should be an object"]
+
+    kc_by_metric = {}
+    for metric_name in metrics:
+        metric_map = file_metrics.get(metric_name)
+        if isinstance(metric_map, dict):
+            normalized_metric_map = {}
+            for player_key, gained_value in metric_map.items():
+                try:
+                    normalized_metric_map[str(player_key)] = float(gained_value or 0)
+                except (TypeError, ValueError):
+                    normalized_metric_map[str(player_key)] = 0.0
+            kc_by_metric[metric_name] = normalized_metric_map
+
+    missing_metrics = sorted(set(metrics) - set(kc_by_metric.keys()))
+    if missing_metrics:
+        notes.append("Missing metrics in WOM cache: " + ", ".join(missing_metrics[:12]))
+
+    return kc_by_metric, notes
 
 
 def build_spooned_index(category_df, selected_boss_metrics, prefetched_kc_by_metric):
@@ -520,7 +567,7 @@ def main():
                 st.subheader("Biggest Spoons by Boss KC Gain")
                 st.caption(
                     f"Using Wise Old Man group pulls (group {WOM_GROUP_ID}, competition ref {WOM_COMPETITION_ID}) "
-                    "with cached prefetch to reduce API requests."
+                    "from a committed cache file for fast category switching."
                 )
                 event_start_date = df["Date"].min()
                 event_end_date = df["Date"].max()
@@ -534,15 +581,16 @@ def main():
                         if metric in SUPPORTED_WOM_BOSS_METRICS
                     }
                 )
-                prefetched_kc_by_metric, prefetch_errors = prefetch_wom_group_metrics_bundle(
+                prefetched_kc_by_metric, prefetch_errors = load_wom_group_metrics_from_file(
+                    str(WOM_CACHE_FILE),
                     WOM_GROUP_ID,
-                    tuple(prefetch_metrics),
                     event_start_date_str,
-                    event_end_date_str
+                    event_end_date_str,
+                    tuple(prefetch_metrics)
                 )
                 st.caption(
                     f"Cached WOM event range: {event_start_date_str} to {event_end_date_str} "
-                    f"({len(prefetch_metrics)} metrics)"
+                    f"({len(prefetch_metrics)} metrics) from {WOM_CACHE_FILE.name}"
                 )
                 available_spoon_categories = sorted(
                     [cat for cat in df["Category"].dropna().unique() if cat in CATEGORY_TO_WOM_BOSSES]

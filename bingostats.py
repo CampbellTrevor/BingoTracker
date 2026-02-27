@@ -94,6 +94,13 @@ def load_and_clean_data(file):
         
         # 3. RENAME: Standardize
         df.columns = ['Date', 'Player', 'Team', 'Category', 'Item', 'Points']
+        df['Player'] = (
+            df['Player']
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .str.replace(r'\s+', '', regex=True)
+        )
         
         # 4. FORMAT: Convert types
         df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')

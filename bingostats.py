@@ -556,8 +556,17 @@ def main():
                         st.info("No spooned index rows were generated for this category.")
 
                     if fetch_errors:
+                        request_failures = [
+                            e for e in fetch_errors
+                            if "request failed" in e.lower() or "rate limited" in e.lower()
+                        ]
+                        warning_title = (
+                            "Some Wise Old Man metric pulls failed after automatic retries. Results may be incomplete.\n"
+                            if request_failures
+                            else "Wise Old Man notes for this result:\n"
+                        )
                         st.warning(
-                            "Some Wise Old Man metric pulls still failed after automatic retries. Results may be incomplete.\n"
+                            warning_title
                             + "\n".join(fetch_errors[:8])
                         )
                 else:

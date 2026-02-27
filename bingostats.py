@@ -79,7 +79,13 @@ def main():
             st.divider()
 
             # --- TABS ---
-            tab_leader, tab_items, tab_player, tab_raw = st.tabs(["🏆 Leaderboards", "📦 Item Stats", "🔍 Individual Search", "💾 Cleaned Data"])
+            tab_leader, tab_items, tab_player, tab_rankings, tab_raw = st.tabs([
+                "🏆 Leaderboards",
+                "📦 Item Stats",
+                "🔍 Individual Search",
+                "📊 Player Rankings",
+                "💾 Cleaned Data"
+            ])
 
             # TAB 1: LEADERBOARDS
             with tab_leader:
@@ -145,7 +151,51 @@ def main():
                         use_container_width=True
                     )
 
-            # TAB 4: RAW DATA
+            # TAB 4: PLAYER RANKINGS
+            with tab_rankings:
+                st.subheader("Top Players by Category")
+                categories = sorted(df['Category'].dropna().unique())
+                if categories:
+                    selected_rank_category = st.selectbox(
+                        "Choose a Category",
+                        categories,
+                        key="rank_category"
+                    )
+
+                    cat_rank_df = (
+                        df[df['Category'] == selected_rank_category]
+                        .groupby('Player', as_index=False)['Points']
+                        .sum()
+                        .sort_values('Points', ascending=False)
+                    )
+                    cat_rank_df.insert(0, "Rank", range(1, len(cat_rank_df) + 1))
+                    st.dataframe(cat_rank_df[['Rank', 'Player', 'Points']], hide_index=True, use_container_width=True)
+                else:
+                    st.info("No categories found in the uploaded data.")
+
+                st.divider()
+
+                st.subheader("Top Players by Item")
+                items = sorted(df['Item'].dropna().unique())
+                if items:
+                    selected_rank_item = st.selectbox(
+                        "Choose an Item",
+                        items,
+                        key="rank_item"
+                    )
+
+                    item_rank_df = (
+                        df[df['Item'] == selected_rank_item]
+                        .groupby('Player', as_index=False)['Points']
+                        .sum()
+                        .sort_values('Points', ascending=False)
+                    )
+                    item_rank_df.insert(0, "Rank", range(1, len(item_rank_df) + 1))
+                    st.dataframe(item_rank_df[['Rank', 'Player', 'Points']], hide_index=True, use_container_width=True)
+                else:
+                    st.info("No items found in the uploaded data.")
+
+            # TAB 5: RAW DATA
             with tab_raw:
                 st.write("Cleaned Data (Using 'Awarded Points'):")
                 st.dataframe(df, use_container_width=True)

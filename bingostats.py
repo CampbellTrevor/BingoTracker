@@ -626,6 +626,11 @@ def main():
                     if not spoon_df.empty:
                         display_df = spoon_df.copy()
                         display_df["Spooned Index"] = display_df["Spooned Index"].fillna(0)
+                        table_df = spoon_df.copy()
+                        table_df.loc[
+                            (table_df["Points"] > 0) & (table_df["KC Gain"] <= 0),
+                            "Spooned Index"
+                        ] = "No WoM Data"
 
                         fig_spoon = px.bar(
                             display_df.head(15),
@@ -638,7 +643,7 @@ def main():
                         )
                         fig_spoon.update_layout(yaxis={"categoryorder": "total ascending"})
                         st.plotly_chart(fig_spoon, use_container_width=True)
-                        st.dataframe(spoon_df, hide_index=True, use_container_width=True)
+                        st.dataframe(table_df, hide_index=True, use_container_width=True)
                     else:
                         st.info("No spooned index rows were generated for this category.")
 

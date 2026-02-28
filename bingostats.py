@@ -900,13 +900,11 @@ def main():
                         display_df = spoon_df.copy()
                         display_df["Rate Luck Index"] = display_df["Rate Luck Index"].fillna(0)
                         table_df = spoon_df.copy()
+                        table_df["WoM Data Status"] = ""
                         table_df.loc[
-                            (table_df["Points"] > 0) & (table_df["KC Gain"] <= 0),
-                            "Spooned Index"
-                        ] = "No WoM Data"
-                        table_df.loc[
-                            (table_df["Points"] > 0) & (table_df["Expected Points"] <= 0),
-                            "Rate Luck Index"
+                            (table_df["Points"] > 0)
+                            & ((table_df["KC Gain"] <= 0) | (table_df["Expected Points"] <= 0)),
+                            "WoM Data Status"
                         ] = "No WoM Data"
 
                         fig_spoon = px.bar(

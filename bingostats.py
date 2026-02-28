@@ -10,9 +10,10 @@ import requests
 
 # --- Page Configuration ---
 st.set_page_config(page_title="OSRS Bingo Tracker", layout="wide", page_icon="⚔️")
-DEFAULT_CSV_PATH = Path("Copy of Copy of Winter Bingo 2026 - Event Log - New Log.csv")
-WOM_CACHE_FILE = Path("wom_group_cache.json")
-MESSAGE_CONFIG_FILE = Path("message.txt")
+APP_DIR = Path(__file__).resolve().parent
+DEFAULT_CSV_PATH = APP_DIR / "Copy of Copy of Winter Bingo 2026 - Event Log - New Log.csv"
+WOM_CACHE_FILE = APP_DIR / "wom_group_cache.json"
+MESSAGE_CONFIG_FILE = APP_DIR / "message.txt"
 WOM_API_BASE_URL = "https://api.wiseoldman.net/v2"
 WOM_GROUP_ID = 11794
 WOM_COMPETITION_ID = 124486

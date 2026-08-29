@@ -116,27 +116,34 @@ def load_and_clean_data(file):
     try:
         # Load the CSV
         df = pd.read_csv(file)
-        
-        # 1. FILTER: Remove the "malformed" test row (Entry #1899)
-        df = df[df['Team'] != '-']
-        
-        # 2. SELECT: We now grab 'Awarded Points' as our primary source
-        # We rename 'Awarded Points' to 'Points' for the app to use
-        # We keep 'Points' as 'Base_Points' just in case we want to compare later
-        
-        # Check if 'Awarded Points' exists, otherwise default to 'Points'
-        if 'Awarded Points' in df.columns:
-            df['Final_Points'] = df['Awarded Points'].fillna(df['Points'])
-        else:
-            df['Final_Points'] = df['Points']
 
-        target_cols = ['Date', 'Player Name', 'Team', 'Tile', 'Item Received', 'Final_Points']
-        
-        # Check for missing columns
-        if not all(col in df.columns for col in target_cols):
-             # Fallback for older CSV versions if names differ
-            st.error(f"Missing columns. Found: {df.columns.tolist()}")
-            return pd.DataFrame()
+        required_cols = ['Date', 'Player Name', 'Team', 'Tile', 'Item Received']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            st.error(
+                f"Missing required columns: {missing_cols}. "
+                f"Found: {df.columns.tolist()}"
+            )
+            return pd.DataFrame(), False
+
+        # Remove the malformed/test row used by the previous event export.
+        df = df[df['Team'] != '-']
+
+        # Point columns are optional for tile-race events. Preserve the previous
+        # event's awarded-points behavior when either legacy column is present.
+        has_points = 'Awarded Points' in df.columns or 'Points' in df.columns
+        if 'Awarded Points' in df.columns and 'Points' in df.columns:
+            df['Final_Points'] = df['Awarded Points'].fillna(df['Points'])
+        elif 'Awarded Points' in df.columns:
+            df['Final_Points'] = df['Awarded Points']
+        elif 'Points' in df.columns:
+            df['Final_Points'] = df['Points']
+        else:
+            # Keep a neutral internal column so legacy analysis helpers remain
+            # structurally compatible until the tile-race rules are finalized.
+            df['Final_Points'] = 0
+
+        target_cols = required_cols + ['Final_Points']
 
         df = df[target_cols]
         
@@ -155,11 +162,11 @@ def load_and_clean_data(file):
         df['Points'] = pd.to_numeric(df['Points'], errors='coerce').fillna(0)
         df['Quantity'] = 1
         
-        return df
+        return df, has_points
         
     except Exception as e:
         st.error(f"Error processing file: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), False
 
 
 def _normalize_name(name):
@@ -553,20 +560,36 @@ def main():
     data_source = uploaded_file if uploaded_file is not None else (DEFAULT_CSV_PATH if DEFAULT_CSV_PATH.exists() else None)
 
     if data_source is not None:
-        df = load_and_clean_data(data_source)
+        df, has_points = load_and_clean_data(data_source)
         
         if not df.empty:
+            activity_col = 'Points' if has_points else 'Quantity'
+            activity_label = 'Points' if has_points else 'Submissions'
+
             # --- KPI ROW ---
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Total Drops", len(df))
-            col2.metric("Total Points", f"{int(df['Points'].sum()):,}")
-            
-            top_player = df.groupby('Player')['Points'].sum().idxmax()
-            top_player_score = df.groupby('Player')['Points'].sum().max()
-            col3.metric("MVP Player", top_player, f"{int(top_player_score)} pts")
-            
-            top_team = df.groupby('Team')['Points'].sum().idxmax()
-            col4.metric("Leading Team", top_team.split('-')[0]) 
+            if has_points:
+                col2.metric("Total Points", f"{int(df['Points'].sum()):,}")
+            else:
+                col2.metric("Unique Tiles", f"{df['Category'].nunique():,}")
+
+            player_activity = df.groupby('Player')[activity_col].sum()
+            top_player = player_activity.idxmax()
+            top_player_activity = player_activity.max()
+            col3.metric(
+                "MVP Player" if has_points else "Most Active Player",
+                top_player,
+                f"{int(top_player_activity):,} {activity_label.lower()}"
+            )
+
+            team_activity = df.groupby('Team')[activity_col].sum()
+            top_team = team_activity.idxmax()
+            col4.metric(
+                "Leading Team" if has_points else "Most Active Team",
+                top_team.split('-')[0],
+                None if has_points else f"{int(team_activity.max()):,} submissions"
+            )
 
             st.divider()
             event_start_date = df["Date"].min()
@@ -607,20 +630,41 @@ def main():
                 c1, c2 = st.columns(2)
                 
                 with c1:
-                    st.subheader("Team Standings (Official)")
-                    # Group by Team and Sum the CORRECTED points
-                    team_df = df.groupby('Team')['Points'].sum().reset_index().sort_values('Points', ascending=False)
+                    st.subheader("Team Standings (Official)" if has_points else "Team Activity (Temporary)")
+                    if not has_points:
+                        st.caption("Submission counts are shown until the tile-race scoring rules are added.")
+                    team_df = (
+                        df.groupby('Team')[activity_col]
+                        .sum()
+                        .reset_index()
+                        .rename(columns={activity_col: activity_label})
+                        .sort_values(activity_label, ascending=False)
+                    )
                     team_df.index = range(1, len(team_df) + 1)
-                    
-                    # Format points to be integers if they are whole numbers
-                    team_df['Points'] = team_df['Points'].apply(lambda x: int(x) if x.is_integer() else x)
+                    team_df[activity_label] = team_df[activity_label].apply(
+                        lambda x: int(x) if float(x).is_integer() else x
+                    )
                     
                     st.dataframe(team_df, use_container_width=True)
 
                 with c2:
                     st.subheader("Top 10 Players")
-                    player_df = df.groupby('Player')['Points'].sum().reset_index().sort_values('Points', ascending=False).head(10)
-                    fig_player = px.bar(player_df, x='Points', y='Player', orientation='h', text='Points', color='Points')
+                    player_df = (
+                        df.groupby('Player')[activity_col]
+                        .sum()
+                        .reset_index()
+                        .rename(columns={activity_col: activity_label})
+                        .sort_values(activity_label, ascending=False)
+                        .head(10)
+                    )
+                    fig_player = px.bar(
+                        player_df,
+                        x=activity_label,
+                        y='Player',
+                        orientation='h',
+                        text=activity_label,
+                        color=activity_label
+                    )
                     fig_player.update_layout(yaxis={'categoryorder':'total ascending'})
                     st.plotly_chart(fig_player, use_container_width=True)
 
@@ -643,9 +687,22 @@ def main():
                     fig_items.update_layout(yaxis={'categoryorder':'total ascending'})
                     st.plotly_chart(fig_items, use_container_width=True)
                     
-                    st.write("### High Value Drops")
-                    high_value = viz_df[viz_df['Points'] >= 5].sort_values('Date', ascending=False).head(10)
-                    st.dataframe(high_value[['Date', 'Player', 'Item', 'Points']], hide_index=True, use_container_width=True)
+                    if has_points:
+                        st.write("### High Value Drops")
+                        high_value = viz_df[viz_df['Points'] >= 5].sort_values('Date', ascending=False).head(10)
+                        st.dataframe(
+                            high_value[['Date', 'Player', 'Item', 'Points']],
+                            hide_index=True,
+                            use_container_width=True
+                        )
+                    else:
+                        st.write("### Recent Submissions")
+                        recent_submissions = viz_df.sort_values('Date', ascending=False).head(10)
+                        st.dataframe(
+                            recent_submissions[['Date', 'Player', 'Category', 'Item']],
+                            hide_index=True,
+                            use_container_width=True
+                        )
 
             # TAB 3: INDIVIDUAL PLAYER
             with tab_player:
@@ -667,13 +724,19 @@ def main():
                     
                     pk1, pk2, pk3, pk4 = st.columns(4)
                     pk1.metric("Submissions", len(p_data))
-                    pk2.metric("Total Points", int(p_data['Points'].sum()))
+                    if has_points:
+                        pk2.metric("Total Points", int(p_data['Points'].sum()))
+                    else:
+                        pk2.metric("Unique Tiles", p_data['Category'].nunique())
                     pk3.metric("Favorite Tile", p_data['Category'].mode()[0] if not p_data.empty else "N/A")
                     pk4.metric("WoM KC (Event)", player_total_kc_display)
                     
                     st.write(f"### Submission History for {selected_player}")
+                    history_cols = ['Date', 'Category', 'Item']
+                    if has_points:
+                        history_cols.append('Points')
                     st.dataframe(
-                        p_data[['Date', 'Category', 'Item', 'Points']].sort_values('Date', ascending=False),
+                        p_data[history_cols].sort_values('Date', ascending=False),
                         use_container_width=True
                     )
 
@@ -690,12 +753,17 @@ def main():
 
                     cat_rank_df = (
                         df[df['Category'] == selected_rank_category]
-                        .groupby('Player', as_index=False)['Points']
+                        .groupby('Player', as_index=False)[activity_col]
                         .sum()
-                        .sort_values('Points', ascending=False)
+                        .rename(columns={activity_col: activity_label})
+                        .sort_values(activity_label, ascending=False)
                     )
                     cat_rank_df.insert(0, "Rank", range(1, len(cat_rank_df) + 1))
-                    st.dataframe(cat_rank_df[['Rank', 'Player', 'Points']], hide_index=True, use_container_width=True)
+                    st.dataframe(
+                        cat_rank_df[['Rank', 'Player', activity_label]],
+                        hide_index=True,
+                        use_container_width=True
+                    )
                 else:
                     st.info("No categories found in the uploaded data.")
 
@@ -712,12 +780,17 @@ def main():
 
                     item_rank_df = (
                         df[df['Item'] == selected_rank_item]
-                        .groupby('Player', as_index=False)['Points']
+                        .groupby('Player', as_index=False)[activity_col]
                         .sum()
-                        .sort_values('Points', ascending=False)
+                        .rename(columns={activity_col: activity_label})
+                        .sort_values(activity_label, ascending=False)
                     )
                     item_rank_df.insert(0, "Rank", range(1, len(item_rank_df) + 1))
-                    st.dataframe(item_rank_df[['Rank', 'Player', 'Points']], hide_index=True, use_container_width=True)
+                    st.dataframe(
+                        item_rank_df[['Rank', 'Player', activity_label]],
+                        hide_index=True,
+                        use_container_width=True
+                    )
                 else:
                     st.info("No items found in the uploaded data.")
 
@@ -730,19 +803,20 @@ def main():
 
                     team_player_rank_df = (
                         df[df['Team'] == selected_team]
-                        .groupby('Player', as_index=False)['Points']
+                        .groupby('Player', as_index=False)[activity_col]
                         .sum()
-                        .sort_values('Points', ascending=False)
+                        .rename(columns={activity_col: activity_label})
+                        .sort_values(activity_label, ascending=False)
                     )
                     team_player_rank_df.insert(0, "Rank", range(1, len(team_player_rank_df) + 1))
                     st.dataframe(
-                        team_player_rank_df[['Rank', 'Player', 'Points']],
+                        team_player_rank_df[['Rank', 'Player', activity_label]],
                         hide_index=True,
                         use_container_width=True
                     )
 
                     st.divider()
-                    st.subheader(f"{selected_team} Item Points by Category")
+                    st.subheader(f"{selected_team} Item {activity_label} by Category")
                     team_df = df[df['Team'] == selected_team]
                     team_categories = sorted(team_df['Category'].dropna().unique())
 
@@ -753,27 +827,28 @@ def main():
                             key="rank_team_category"
                         )
 
-                        team_item_points_df = (
+                        team_item_activity_df = (
                             team_df[team_df['Category'] == selected_team_category]
-                            .groupby('Item', as_index=False)['Points']
+                            .groupby('Item', as_index=False)[activity_col]
                             .sum()
-                            .sort_values('Points', ascending=False)
+                            .rename(columns={activity_col: activity_label})
+                            .sort_values(activity_label, ascending=False)
                         )
-                        team_item_points_df.insert(0, "Rank", range(1, len(team_item_points_df) + 1))
+                        team_item_activity_df.insert(0, "Rank", range(1, len(team_item_activity_df) + 1))
 
                         fig_team_items = px.bar(
-                            team_item_points_df.head(20),
-                            x='Points',
+                            team_item_activity_df.head(20),
+                            x=activity_label,
                             y='Item',
                             orientation='h',
-                            text='Points',
-                            color='Points',
-                            title=f"{selected_team} - {selected_team_category}: Points by Item"
+                            text=activity_label,
+                            color=activity_label,
+                            title=f"{selected_team} - {selected_team_category}: {activity_label} by Item"
                         )
                         fig_team_items.update_layout(yaxis={'categoryorder': 'total ascending'})
                         st.plotly_chart(fig_team_items, use_container_width=True)
                         st.dataframe(
-                            team_item_points_df[['Rank', 'Item', 'Points']],
+                            team_item_activity_df[['Rank', 'Item', activity_label]],
                             hide_index=True,
                             use_container_width=True
                         )
@@ -809,9 +884,9 @@ def main():
                     ]
 
                     if selected_kc_metrics:
-                        category_points_by_player = (
+                        category_activity_by_player = (
                             df[df["Category"] == selected_kc_category]
-                            .groupby("Player", as_index=False)["Points"]
+                            .groupby("Player", as_index=False)[activity_col]
                             .sum()
                         )
 
@@ -822,22 +897,22 @@ def main():
                                 prefetched_kc_by_metric.get(metric_name, {}).get(wom_lookup_key, 0.0)
                                 for metric_name in selected_kc_metrics
                             )
-                            player_points = float(
-                                category_points_by_player.loc[
-                                    category_points_by_player["Player"] == player,
-                                    "Points"
+                            player_activity_value = float(
+                                category_activity_by_player.loc[
+                                    category_activity_by_player["Player"] == player,
+                                    activity_col
                                 ].sum()
                             )
                             kc_rows.append(
                                 {
                                     "Player": player,
                                     "KC Gain": round(player_kc_gain, 2),
-                                    "Points": round(player_points, 2),
+                                    activity_label: round(player_activity_value, 2),
                                 }
                             )
 
                         kc_df = pd.DataFrame(kc_rows).sort_values(
-                            by=["KC Gain", "Points"],
+                            by=["KC Gain", activity_label],
                             ascending=[False, False]
                         ).reset_index(drop=True)
                         kc_df.insert(0, "Rank", range(1, len(kc_df) + 1))
@@ -870,8 +945,12 @@ def main():
                     f"Cached WOM event range: {event_start_date_str} to {event_end_date_str} "
                     f"({len(prefetch_metrics)} metrics) from {WOM_CACHE_FILE.name}"
                 )
-                available_spoon_categories = sorted(
-                    [cat for cat in df["Category"].dropna().unique() if cat in CATEGORY_TO_WOM_BOSSES]
+                available_spoon_categories = (
+                    sorted(
+                        [cat for cat in df["Category"].dropna().unique() if cat in CATEGORY_TO_WOM_BOSSES]
+                    )
+                    if has_points
+                    else []
                 )
 
                 if available_spoon_categories:
@@ -937,13 +1016,23 @@ def main():
                             warning_title
                             + "\n".join(all_wom_notes[:10])
                         )
+                elif not has_points:
+                    st.info(
+                        "The point-based spooned index is paused for tile-race CSVs. "
+                        "It can be replaced once the new event rules are finalized."
+                    )
                 else:
                     st.info("No boss categories mapped for Wise Old Man spooned index yet.")
 
             # TAB 8: RAW DATA
             with tab_raw:
-                st.write("Cleaned Data (Using 'Awarded Points'):")
-                st.dataframe(df, use_container_width=True)
+                if has_points:
+                    st.write("Cleaned Data (Using legacy point scoring):")
+                    display_cols = ['Date', 'Player', 'Team', 'Category', 'Item', 'Points']
+                else:
+                    st.write("Cleaned Data (Tile-race preparation; no point columns required):")
+                    display_cols = ['Date', 'Player', 'Team', 'Category', 'Item']
+                st.dataframe(df[display_cols], use_container_width=True)
 
     else:
         st.info(f"👋 No CSV available. Add {DEFAULT_CSV_PATH.name} to the app folder or upload a CSV.")

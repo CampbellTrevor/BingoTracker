@@ -614,8 +614,9 @@ def main():
             boss_speeds, items_db, message_config_notes = load_spoon_config_from_message(str(MESSAGE_CONFIG_FILE))
 
             # --- TABS ---
-            tab_leader, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_highest_kc, tab_spooned, tab_raw = st.tabs([
+            tab_leader, tab_player_leaderboard, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_highest_kc, tab_spooned, tab_raw = st.tabs([
                 "🏆 Leaderboards",
+                "📋 Player Leaderboard",
                 "📦 Item Stats",
                 "🔍 Individual Search",
                 "📊 Player Rankings",
@@ -668,7 +669,29 @@ def main():
                     fig_player.update_layout(yaxis={'categoryorder':'total ascending'})
                     st.plotly_chart(fig_player, use_container_width=True)
 
-            # TAB 2: ITEM STATS
+            # TAB 2: PLAYER LEADERBOARD
+            with tab_player_leaderboard:
+                st.subheader("Player Leaderboard")
+                st.caption("All players ranked by submissions; ties are ordered alphabetically.")
+                player_leaderboard_df = (
+                    df.groupby(['Player', 'Team'], as_index=False)['Quantity']
+                    .sum()
+                    .rename(columns={'Quantity': 'Submissions'})
+                    .sort_values(['Submissions', 'Player'], ascending=[False, True])
+                    .reset_index(drop=True)
+                )
+                player_leaderboard_df.insert(
+                    0,
+                    "Rank",
+                    range(1, len(player_leaderboard_df) + 1)
+                )
+                st.dataframe(
+                    player_leaderboard_df[['Rank', 'Player', 'Team', 'Submissions']],
+                    hide_index=True,
+                    use_container_width=True
+                )
+
+            # TAB 3: ITEM STATS
             with tab_items:
                 col_filter, col_chart = st.columns([1, 3])
                 
@@ -704,7 +727,7 @@ def main():
                             use_container_width=True
                         )
 
-            # TAB 3: INDIVIDUAL PLAYER
+            # TAB 4: INDIVIDUAL PLAYER
             with tab_player:
                 players_list = sorted(df['Player'].unique())
                 selected_player = st.selectbox("Select a Player", players_list)
@@ -740,7 +763,7 @@ def main():
                         use_container_width=True
                     )
 
-            # TAB 4: PLAYER RANKINGS
+            # TAB 5: PLAYER RANKINGS
             with tab_rankings:
                 st.subheader("Top Players by Category")
                 categories = sorted(df['Category'].dropna().unique())
@@ -794,7 +817,7 @@ def main():
                 else:
                     st.info("No items found in the uploaded data.")
 
-            # TAB 5: TEAM RANKINGS
+            # TAB 6: TEAM RANKINGS
             with tab_team_rankings:
                 st.subheader("Top Players by Team")
                 teams = sorted(df['Team'].dropna().unique())
@@ -857,7 +880,7 @@ def main():
                 else:
                     st.info("No teams found in the uploaded data.")
 
-            # TAB 6: HIGHEST KC
+            # TAB 7: HIGHEST KC
             with tab_highest_kc:
                 st.subheader("Highest KC by Category")
                 st.caption(
@@ -934,7 +957,7 @@ def main():
                 else:
                     st.info("No categories available for Highest KC view.")
 
-            # TAB 7: SPOONED INDEX
+            # TAB 8: SPOONED INDEX
             with tab_spooned:
                 st.subheader("Biggest Spoons by Boss KC Gain")
                 st.caption(
@@ -1024,7 +1047,7 @@ def main():
                 else:
                     st.info("No boss categories mapped for Wise Old Man spooned index yet.")
 
-            # TAB 8: RAW DATA
+            # TAB 9: RAW DATA
             with tab_raw:
                 if has_points:
                     st.write("Cleaned Data (Using legacy point scoring):")

@@ -8,10 +8,8 @@ import json
 import requests
 
 from board_progress import (
-    BOARD_TILES,
     board_readiness_rows,
-    board_submission_summary,
-    index_team_submissions,
+    calculate_team_progress,
     load_tile_rules,
     render_board_html,
 )
@@ -93,9 +91,15 @@ def load_and_clean_data(file):
         # A numeric Entry # is preferred when the existing CSV happens to carry
         # one, but it is not required by the Summer CSV contract.
         df['_Source_Order'] = range(len(df))
+        df['Source_Row'] = df['_Source_Order']
         if 'Entry #' in df.columns:
             entry_order = pd.to_numeric(df['Entry #'], errors='coerce')
-            df['Submission_Order'] = entry_order.fillna(df['_Source_Order'])
+            if entry_order.notna().all() and entry_order.is_unique:
+                df['Submission_Order'] = entry_order
+            else:
+                # A partial/duplicated Entry # can interleave incorrectly with
+                # row ordinals, so use the unchanged file order for every row.
+                df['Submission_Order'] = df['_Source_Order']
         else:
             df['Submission_Order'] = df['_Source_Order']
 
@@ -117,7 +121,7 @@ def load_and_clean_data(file):
             # structurally compatible until the tile-race rules are finalized.
             df['Final_Points'] = 0
 
-        target_cols = required_cols + ['Final_Points', 'Submission_Order']
+        target_cols = required_cols + ['Final_Points', 'Submission_Order', 'Source_Row']
 
         df = df[target_cols]
         
@@ -138,6 +142,7 @@ def load_and_clean_data(file):
         df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
         df['Points'] = pd.to_numeric(df['Points'], errors='coerce').fillna(0)
         df['Submission_Order'] = pd.to_numeric(df['Submission_Order'], errors='coerce')
+        df['Source_Row'] = pd.to_numeric(df['Source_Row'], errors='coerce')
         df['Quantity'] = 1
         
         return df, has_points
@@ -372,6 +377,12 @@ def main():
         if not df.empty:
             activity_col = 'Points' if has_points else 'Quantity'
             activity_label = 'Points' if has_points else 'Submissions'
+            board_teams = sorted(
+                team for team in df['Team'].dropna().unique() if str(team).strip()
+            )
+            team_progress_by_name = {
+                team: calculate_team_progress(df, team) for team in board_teams
+            }
 
             # --- KPI ROW ---
             col1, col2, col3, col4 = st.columns(4)
@@ -379,7 +390,10 @@ def main():
             if has_points:
                 col2.metric("Total Points", f"{int(df['Points'].sum()):,}")
             else:
-                col2.metric("Submitted Tile Names", f"{df['Category'].nunique():,}")
+                total_completed_tiles = sum(
+                    progress['completed_count'] for progress in team_progress_by_name.values()
+                )
+                col2.metric("Completed Tiles", f"{total_completed_tiles:,}")
 
             player_activity = df.groupby('Player')[activity_col].sum()
             top_player = player_activity.idxmax()
@@ -390,13 +404,27 @@ def main():
                 f"{int(top_player_activity):,} {activity_label.lower()}"
             )
 
-            team_activity = df.groupby('Team')[activity_col].sum()
-            top_team = team_activity.idxmax()
-            col4.metric(
-                "Leading Team" if has_points else "Most Active Team",
-                top_team.split('-')[0],
-                None if has_points else f"{int(team_activity.max()):,} submissions"
-            )
+            if has_points:
+                team_activity = df.groupby('Team')[activity_col].sum()
+                top_team = team_activity.idxmax()
+                col4.metric("Leading Team", top_team.split('-')[0])
+            elif team_progress_by_name:
+                leading_team, leading_progress = sorted(
+                    team_progress_by_name.items(),
+                    key=lambda item: (
+                        -item[1]['completed_count'],
+                        -item[1]['section_rank'],
+                        -item[1]['section_completed'],
+                        item[0],
+                    ),
+                )[0]
+                col4.metric(
+                    "Leading Team (Provisional)",
+                    leading_team,
+                    f"{leading_progress['completed_count']}/31 tiles",
+                )
+            else:
+                col4.metric("Leading Team (Provisional)", "N/A")
 
             st.divider()
             valid_event_dates = df["Date"].dropna()
@@ -440,46 +468,37 @@ def main():
                 "💾 Cleaned Data"
             ])
 
-            # BOARD PROGRESS PREVIEW
+            # PROVISIONAL BOARD PROGRESS
             with tab_board:
                 st.subheader("Interactive Board Progress")
                 st.info(
-                    "Preparation mode: hover details show raw matched submissions, but no tile is "
-                    "marked complete until the official drop requirements are configured."
+                    "Provisional rule: the first eligible submission finishes a tile. Submissions "
+                    "received while a tile is locked do not count and are not banked for later."
                 )
 
-                board_teams = sorted(team for team in df['Team'].dropna().unique() if str(team).strip())
                 if board_teams:
                     selected_board_team = st.selectbox(
                         "Choose a team",
                         board_teams,
                         key="board_team",
                     )
-                    grouped_board_submissions, unmatched_board_submissions = index_team_submissions(
-                        df,
-                        selected_board_team,
-                    )
-                    board_summary = board_submission_summary(
-                        grouped_board_submissions,
-                        unmatched_board_submissions,
-                    )
-                    board_tile_type_count = len({tile.canonical_key for tile in BOARD_TILES})
+                    selected_progress = team_progress_by_name[selected_board_team]
 
                     bm1, bm2, bm3, bm4 = st.columns(4)
-                    bm1.metric("Matched Submissions", board_summary['matched_submissions'])
+                    bm1.metric("Completed Tiles", f"{selected_progress['completed_count']}/31")
                     bm2.metric(
-                        "CSV Tile Names With Drops",
-                        f"{board_summary['matched_tile_types']}/{board_tile_type_count}",
+                        selected_progress['current_section'],
+                        f"{selected_progress['section_completed']}/{selected_progress['section_total']}",
                     )
-                    bm3.metric("Unmatched Submissions", board_summary['unmatched_submissions'])
-                    bm4.metric("CG Submissions", board_summary['cg_submissions'])
+                    bm3.metric("Ignored While Locked", selected_progress['ignored_locked_count'])
+                    bm4.metric("Unmatched Submissions", selected_progress['unmatched_count'])
+                    st.caption(f"Next objective: {selected_progress['next_objective']}")
 
                     if BOARD_IMAGE_FILE.exists():
                         st.markdown(
                             render_board_html(
                                 BOARD_IMAGE_FILE,
-                                grouped_board_submissions,
-                                board_rules,
+                                selected_progress,
                                 selected_board_team,
                             ),
                             unsafe_allow_html=True,
@@ -488,32 +507,46 @@ def main():
                         st.error(f"Board image is missing: {BOARD_IMAGE_FILE.name}")
 
                     st.caption(
-                        "Corrupted Gauntlet is explicitly flagged as available from the start using "
-                        "the team's one starting CG chest. TOA, TOB, and COX each appear twice; their "
-                        "raw submissions are visible on both matching slots until chronological slot "
-                        "assignment can be finalized from the tile rules."
+                        "Hallway 1 is TOA → NEX → HUEYCOATL. The first grid is any-order. Hallway 2 "
+                        "is VOIDWAKER → PNM/NIGHTMARE → COX, followed by the any-order final grid. "
+                        "CG alone is available from the start using the team's opening chest."
                     )
 
-                    with st.expander("Submission matching diagnostics"):
-                        if unmatched_board_submissions.empty:
-                            st.success("Every submission for this team matched a recognized board tile name.")
+                    with st.expander("Ignored and unmatched submission diagnostics"):
+                        diagnostic_rows = (
+                            selected_progress['ignored_locked'] + selected_progress['unmatched']
+                        )
+                        if not diagnostic_rows:
+                            st.success("No locked or unmatched submissions were found for this team.")
                         else:
                             st.warning(
-                                "These CSV tile names were not guessed because they do not map "
-                                "unambiguously to one board tile."
+                                "These rows did not complete a tile. Locked rows require a fresh "
+                                "submission after the tile becomes available."
                             )
-                            unmatched_counts = (
-                                unmatched_board_submissions['Category']
-                                .value_counts(dropna=False)
-                                .rename_axis('CSV Tile')
-                                .reset_index(name='Submissions')
+                            diagnostic_df = pd.DataFrame(diagnostic_rows)
+                            diagnostic_columns = [
+                                column
+                                for column in (
+                                    'Date', 'Player', 'Category', 'Item',
+                                    'Board Slot', 'Disposition', 'Reason'
+                                )
+                                if column in diagnostic_df.columns
+                            ]
+                            st.dataframe(
+                                diagnostic_df[diagnostic_columns],
+                                hide_index=True,
+                                width='stretch',
                             )
-                            st.dataframe(unmatched_counts, hide_index=True, width='stretch')
+                        if selected_progress['extra_submission_count']:
+                            st.caption(
+                                f"{selected_progress['extra_submission_count']} additional submission(s) "
+                                "arrived after every matching physical slot was already complete."
+                            )
 
-                    with st.expander("Tile rule readiness (31 board slots)"):
+                    with st.expander("Provisional tile rules (31 board slots)"):
                         st.caption(
-                            "Each repeated tile has its own slot ID so its eventual completion "
-                            "requirements can differ by board position."
+                            "Each slot currently needs one eligible submission. These provisional "
+                            "rules can be replaced when the official item requirements arrive."
                         )
                         st.dataframe(
                             pd.DataFrame(board_readiness_rows(board_rules)),
@@ -528,20 +561,47 @@ def main():
                 c1, c2 = st.columns(2)
                 
                 with c1:
-                    st.subheader("Team Standings (Official)" if has_points else "Team Activity (Temporary)")
-                    if not has_points:
-                        st.caption("Submission counts are shown until the tile-race scoring rules are added.")
-                    team_df = (
-                        df.groupby('Team')[activity_col]
-                        .sum()
-                        .reset_index()
-                        .rename(columns={activity_col: activity_label})
-                        .sort_values(activity_label, ascending=False)
-                    )
-                    team_df.index = range(1, len(team_df) + 1)
-                    team_df[activity_label] = team_df[activity_label].apply(
-                        lambda x: int(x) if float(x).is_integer() else x
-                    )
+                    st.subheader("Team Standings (Official)" if has_points else "Team Board Progress (Provisional)")
+                    if has_points:
+                        team_df = (
+                            df.groupby('Team')[activity_col]
+                            .sum()
+                            .reset_index()
+                            .rename(columns={activity_col: activity_label})
+                            .sort_values(activity_label, ascending=False)
+                        )
+                        team_df.index = range(1, len(team_df) + 1)
+                        team_df[activity_label] = team_df[activity_label].apply(
+                            lambda x: int(x) if float(x).is_integer() else x
+                        )
+                    else:
+                        st.caption(
+                            "Ranked using the provisional first-eligible-submission rule."
+                        )
+                        team_df = pd.DataFrame(
+                            [
+                                {
+                                    "Team": team,
+                                    "Completed Tiles": progress['completed_count'],
+                                    "Current Section": progress['current_section'],
+                                    "Section Progress": (
+                                        f"{progress['section_completed']}/{progress['section_total']}"
+                                    ),
+                                    "Ignored Locked": progress['ignored_locked_count'],
+                                    "Submissions": int((df['Team'] == team).sum()),
+                                    "_Section Completed": progress['section_completed'],
+                                    "_Section Rank": progress['section_rank'],
+                                }
+                                for team, progress in team_progress_by_name.items()
+                            ]
+                        ).sort_values(
+                            ["Completed Tiles", "_Section Rank", "_Section Completed", "Team"],
+                            ascending=[False, False, False, True],
+                        )
+                        team_df = team_df.drop(
+                            columns=["_Section Rank", "_Section Completed"]
+                        ).reset_index(drop=True)
+                        team_df.insert(0, "Rank", range(1, len(team_df) + 1))
                     
                     st.dataframe(team_df, width='stretch')
 

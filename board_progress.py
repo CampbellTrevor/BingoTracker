@@ -4,7 +4,7 @@ import base64
 import html
 import json
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -184,17 +184,12 @@ def _build_alias_lookup() -> dict[str, str]:
 
 
 ALIAS_LOOKUP = _build_alias_lookup()
-DUPLICATE_KEYS = {
-    key for key, count in Counter(tile.canonical_key for tile in BOARD_TILES).items() if count > 1
-}
-
-
 def match_tile_key(value: Any) -> str | None:
     return ALIAS_LOOKUP.get(normalize_tile_name(value))
 
 
 def load_tile_rules(rules_path: Path) -> dict[str, dict[str, Any]]:
-    """Load the future completion-rule file without treating missing rules as complete."""
+    """Load the per-slot provisional/future completion-rule metadata."""
 
     try:
         payload = json.loads(rules_path.read_text(encoding="utf-8"))
@@ -213,31 +208,276 @@ def load_tile_rules(rules_path: Path) -> dict[str, dict[str, Any]]:
 
 def _sorted_team_rows(df: pd.DataFrame, team: str) -> pd.DataFrame:
     team_rows = df[df["Team"].astype(str) == str(team)].copy()
-    sort_columns = [column for column in ("Date", "Submission_Order") if column in team_rows.columns]
+    # Entry/source order is authoritative for lock transitions. Dates remain
+    # display metadata because malformed dates must not move an early locked row
+    # to the end and accidentally make it eligible.
+    sort_columns = [
+        column
+        for column in ("Submission_Order", "Source_Row")
+        if column in team_rows.columns
+    ]
+    if not sort_columns and "Date" in team_rows.columns:
+        sort_columns = ["Date"]
     if sort_columns:
         team_rows = team_rows.sort_values(sort_columns, kind="stable", na_position="last")
     return team_rows
 
 
-def index_team_submissions(
-    df: pd.DataFrame,
-    team: str,
-) -> tuple[dict[str, list[dict[str, Any]]], pd.DataFrame]:
-    """Group raw submissions by board key; do not infer completion."""
+TILES_BY_ID = {tile.tile_id: tile for tile in BOARD_TILES}
+TILE_IDS_BY_KEY: dict[str, tuple[str, ...]] = {
+    canonical_key: tuple(
+        tile.tile_id for tile in BOARD_TILES if tile.canonical_key == canonical_key
+    )
+    for canonical_key in CANONICAL_ALIASES
+}
+START_TILE_IDS = ("start_toa", "start_nex", "start_hueycoatl")
+GRID_ONE_TILE_IDS = tuple(tile.tile_id for tile in BOARD_TILES if tile.stage == "grid_one")
+ORDERED_PATH_TILE_IDS = ("path_voidwaker", "path_pnm_nightmare", "path_cox")
+FINAL_GRID_TILE_IDS = tuple(tile.tile_id for tile in BOARD_TILES if tile.stage == "final_grid")
+CG_TILE_ID = "final_corrupted_gauntlet"
+BONUS_TILE_ID = "bonus_corp_beast"
 
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    unmatched_indices: list[Any] = []
-    team_rows = _sorted_team_rows(df, team)
 
-    for row_index, row in team_rows.iterrows():
+def _all_complete(completed_tile_ids: set[str], required_tile_ids: tuple[str, ...]) -> bool:
+    return set(required_tile_ids).issubset(completed_tile_ids)
+
+
+def _eligible_tile_ids(completed_tile_ids: set[str]) -> set[str]:
+    """Return the slots eligible immediately after the current completions."""
+
+    eligible: set[str] = set()
+
+    # Hallway 1 is strictly TOA -> NEX -> HUEYCOATL.
+    if "start_toa" not in completed_tile_ids:
+        eligible.add("start_toa")
+    elif "start_nex" not in completed_tile_ids:
+        eligible.add("start_nex")
+    elif "start_hueycoatl" not in completed_tile_ids:
+        eligible.add("start_hueycoatl")
+    elif not _all_complete(completed_tile_ids, GRID_ONE_TILE_IDS):
+        eligible.update(set(GRID_ONE_TILE_IDS) - completed_tile_ids)
+    # Hallway 2 is strictly VOIDWAKER -> PNM/NIGHTMARE -> COX.
+    elif "path_voidwaker" not in completed_tile_ids:
+        eligible.add("path_voidwaker")
+    elif "path_pnm_nightmare" not in completed_tile_ids:
+        eligible.add("path_pnm_nightmare")
+    elif "path_cox" not in completed_tile_ids:
+        eligible.add("path_cox")
+    elif not _all_complete(completed_tile_ids, FINAL_GRID_TILE_IDS):
+        eligible.update(set(FINAL_GRID_TILE_IDS) - completed_tile_ids)
+    elif BONUS_TILE_ID not in completed_tile_ids:
+        eligible.add(BONUS_TILE_ID)
+
+    # The starting CG chest is the only exception to the normal gates.
+    if CG_TILE_ID not in completed_tile_ids:
+        eligible.add(CG_TILE_ID)
+    return eligible
+
+
+def _locked_reason(tile_id: str) -> str:
+    if tile_id == "start_nex":
+        return "NEX was locked because the opening TOA tile was not finished yet."
+    if tile_id == "start_hueycoatl":
+        return "HUEYCOATL was locked because NEX was not finished yet."
+    if tile_id in GRID_ONE_TILE_IDS:
+        return "The first grid was locked until TOA, NEX, and HUEYCOATL were finished in order."
+    if tile_id == "path_voidwaker":
+        return "VOIDWAKER was locked until every tile in the first grid was finished."
+    if tile_id == "path_pnm_nightmare":
+        return "PNM/NIGHTMARE was locked because VOIDWAKER was not finished yet."
+    if tile_id == "path_cox":
+        return "COX was locked because PNM/NIGHTMARE was not finished yet."
+    if tile_id in FINAL_GRID_TILE_IDS:
+        return "The final grid was locked until VOIDWAKER, PNM/NIGHTMARE, and COX were finished in order."
+    if tile_id == BONUS_TILE_ID:
+        return "CORP BEAST was locked until every tile in the final grid was finished."
+    return "This tile was locked when the submission was received."
+
+
+def _gate_text(tile_id: str) -> str:
+    if tile_id == "start_toa":
+        return "Available at event start."
+    if tile_id == "start_nex":
+        return "Unlocks after the opening TOA tile is finished."
+    if tile_id == "start_hueycoatl":
+        return "Unlocks after NEX is finished."
+    if tile_id in GRID_ONE_TILE_IDS:
+        return "Unlocks after TOA, NEX, and HUEYCOATL are finished in order."
+    if tile_id == "path_voidwaker":
+        return "Unlocks after all 12 tiles in the first grid are finished."
+    if tile_id == "path_pnm_nightmare":
+        return "Unlocks after VOIDWAKER is finished."
+    if tile_id == "path_cox":
+        return "Unlocks after PNM/NIGHTMARE is finished."
+    if tile_id == CG_TILE_ID:
+        return "Available from event start using the team's one starting CG chest."
+    if tile_id in FINAL_GRID_TILE_IDS:
+        return "Unlocks after the second hallway ends with COX."
+    if tile_id == BONUS_TILE_ID:
+        return "Unlocks after all 12 tiles in the final grid are finished."
+    return STAGE_DETAILS[TILES_BY_ID[tile_id].stage]["unlock"]
+
+
+def _current_section(completed_tile_ids: set[str]) -> tuple[str, int, int]:
+    if not _all_complete(completed_tile_ids, START_TILE_IDS):
+        return "Opening hallway", len(completed_tile_ids.intersection(START_TILE_IDS)), len(START_TILE_IDS)
+    if not _all_complete(completed_tile_ids, GRID_ONE_TILE_IDS):
+        return "First grid", len(completed_tile_ids.intersection(GRID_ONE_TILE_IDS)), len(GRID_ONE_TILE_IDS)
+    if not _all_complete(completed_tile_ids, ORDERED_PATH_TILE_IDS):
+        return "Second hallway", len(completed_tile_ids.intersection(ORDERED_PATH_TILE_IDS)), len(ORDERED_PATH_TILE_IDS)
+    if not _all_complete(completed_tile_ids, FINAL_GRID_TILE_IDS):
+        return "Final grid", len(completed_tile_ids.intersection(FINAL_GRID_TILE_IDS)), len(FINAL_GRID_TILE_IDS)
+    if BONUS_TILE_ID not in completed_tile_ids:
+        return "Bonus tile", 0, 1
+    return "Board complete", 1, 1
+
+
+def _next_objective(
+    completed_tile_ids: set[str],
+    eligible_tile_ids: set[str],
+    section: str,
+) -> str:
+    main_eligible = [
+        tile.tile_id
+        for tile in BOARD_TILES
+        if tile.tile_id in eligible_tile_ids and tile.tile_id != CG_TILE_ID
+    ]
+    if section in {"First grid", "Final grid"} and main_eligible:
+        objective = f"Any of {len(main_eligible)} unlocked {section.lower()} tiles"
+    elif main_eligible:
+        objective = " → ".join(TILES_BY_ID[tile_id].label for tile_id in main_eligible)
+    elif section == "Board complete":
+        objective = "Everything is finished"
+    else:
+        objective = section
+
+    if CG_TILE_ID in eligible_tile_ids and CG_TILE_ID not in completed_tile_ids:
+        objective += "; CG is also open from the starting chest"
+    return objective
+
+
+def calculate_team_progress(df: pd.DataFrame, team: str) -> dict[str, Any]:
+    """Apply the provisional first-eligible-submission completion rule."""
+
+    completed_events: dict[str, dict[str, Any]] = {}
+    completion_sequence: dict[str, int] = {}
+    extra_submissions: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    locked_attempts: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    ignored_locked: list[dict[str, Any]] = []
+    unmatched: list[dict[str, Any]] = []
+    accepted: list[dict[str, Any]] = []
+
+    for sequence, (_, row) in enumerate(_sorted_team_rows(df, team).iterrows(), start=1):
+        submission = row.to_dict()
         canonical_key = match_tile_key(row.get("Category"))
         if canonical_key is None:
-            unmatched_indices.append(row_index)
+            diagnostic = {
+                **submission,
+                "Board Slot": "Unmatched",
+                "Disposition": "Not counted",
+                "Reason": "CSV tile name does not map unambiguously to a board tile.",
+            }
+            unmatched.append(diagnostic)
             continue
-        grouped[canonical_key].append(row.to_dict())
 
-    unmatched = team_rows.loc[unmatched_indices].copy() if unmatched_indices else team_rows.iloc[0:0].copy()
-    return dict(grouped), unmatched
+        candidate_tile_ids = TILE_IDS_BY_KEY[canonical_key]
+        completed_tile_ids = set(completed_events)
+        eligible_tile_ids = _eligible_tile_ids(completed_tile_ids)
+        acceptable_tile_ids = [
+            tile_id
+            for tile_id in candidate_tile_ids
+            if tile_id not in completed_events and tile_id in eligible_tile_ids
+        ]
+
+        if len(acceptable_tile_ids) > 1:
+            raise RuntimeError(
+                f"Board configuration error: multiple eligible slots for {canonical_key}: "
+                + ", ".join(acceptable_tile_ids)
+            )
+
+        if acceptable_tile_ids:
+            tile_id = acceptable_tile_ids[0]
+            completed_events[tile_id] = submission
+            completion_sequence[tile_id] = sequence
+            accepted.append(
+                {
+                    **submission,
+                    "Board Slot": tile_id,
+                    "Disposition": "Completed tile",
+                    "Reason": "First eligible submission for this tile.",
+                }
+            )
+            continue
+
+        incomplete_tile_ids = [
+            tile_id for tile_id in candidate_tile_ids if tile_id not in completed_events
+        ]
+        if incomplete_tile_ids:
+            # For repeated TOA/TOB/COX labels, attach the rejected attempt to the
+            # next unfinished physical slot. It is never banked for later.
+            tile_id = incomplete_tile_ids[0]
+            reason = _locked_reason(tile_id)
+            diagnostic = {
+                **submission,
+                "Board Slot": tile_id,
+                "Disposition": "Ignored while locked",
+                "Reason": reason,
+            }
+            locked_attempts[tile_id].append(submission)
+            ignored_locked.append(diagnostic)
+            continue
+
+        # Once every physical slot with this label is complete, later rows are
+        # retained as extra hover history but do not change progress.
+        tile_id = max(candidate_tile_ids, key=lambda candidate: completion_sequence[candidate])
+        extra_submissions[tile_id].append(submission)
+
+    completed_tile_ids = set(completed_events)
+    eligible_tile_ids = _eligible_tile_ids(completed_tile_ids)
+    section, section_completed, section_total = _current_section(completed_tile_ids)
+    section_rank = {
+        "Opening hallway": 0,
+        "First grid": 1,
+        "Second hallway": 2,
+        "Final grid": 3,
+        "Bonus tile": 4,
+        "Board complete": 5,
+    }[section]
+    states: dict[str, dict[str, Any]] = {}
+    for tile in BOARD_TILES:
+        if tile.tile_id in completed_events:
+            status = "complete"
+        elif tile.tile_id in eligible_tile_ids:
+            status = "available"
+        else:
+            status = "locked"
+        states[tile.tile_id] = {
+            "status": status,
+            "completion": completed_events.get(tile.tile_id),
+            "extras": extra_submissions.get(tile.tile_id, []),
+            "locked_attempts": locked_attempts.get(tile.tile_id, []),
+        }
+
+    extra_count = sum(len(rows) for rows in extra_submissions.values())
+    return {
+        "team": team,
+        "states": states,
+        "accepted": accepted,
+        "ignored_locked": ignored_locked,
+        "unmatched": unmatched,
+        "completed_count": len(completed_events),
+        "available_count": len(eligible_tile_ids),
+        "locked_count": len(BOARD_TILES) - len(completed_events) - len(eligible_tile_ids),
+        "ignored_locked_count": len(ignored_locked),
+        "unmatched_count": len(unmatched),
+        "extra_submission_count": extra_count,
+        "current_section": section,
+        "section_rank": section_rank,
+        "section_completed": section_completed,
+        "section_total": section_total,
+        "next_objective": _next_objective(completed_tile_ids, eligible_tile_ids, section),
+        "cg_complete": CG_TILE_ID in completed_events,
+    }
 
 
 def board_readiness_rows(rules: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
@@ -306,83 +546,109 @@ def _image_data_uri(image_path: Path) -> str:
 
 def render_board_html(
     image_path: Path,
-    grouped_submissions: dict[str, list[dict[str, Any]]],
-    rules: dict[str, dict[str, Any]],
+    progress: dict[str, Any],
     team: str,
 ) -> str:
-    """Render a rules-pending board preview with safe hover/focus details."""
+    """Render provisional complete/available/locked states and hover details."""
 
     image_uri = _image_data_uri(image_path)
     hotspots: list[str] = []
 
     for tile in BOARD_TILES:
-        submissions = grouped_submissions.get(tile.canonical_key, [])
-        submission_count = len(submissions)
-        rule = rules.get(tile.tile_id, {})
-        rule_status = str(rule.get("status", "pending")).strip().lower() or "pending"
+        tile_state = progress["states"][tile.tile_id]
+        status = tile_state["status"]
+        completion = tile_state["completion"]
+        extras = tile_state["extras"]
+        ignored = tile_state["locked_attempts"]
+        completion_count = 1 if completion is not None else 0
+        extra_count = len(extras)
+        ignored_count = len(ignored)
 
-        if submission_count and tile.canonical_key in DUPLICATE_KEYS:
-            state_class = "bp-state-shared"
-            state_label = "Shared tile-name submissions; slot assignment and completion rules pending"
-            data_status = "shared-submissions-rules-pending"
-        elif submission_count:
-            state_class = "bp-state-submitted"
-            state_label = "Submissions logged; completion rule pending"
-            data_status = "submitted-rules-pending"
-        elif tile.always_available:
-            state_class = "bp-state-opening"
-            state_label = "Available from the start; completion rule pending"
-            data_status = "opening-exception-rules-pending"
+        if status == "complete":
+            state_label = "Provisional complete"
+            badge_label = "DONE"
+        elif status == "available":
+            state_label = "Available now"
+            badge_label = "NOW"
         else:
-            state_class = "bp-state-pending"
-            state_label = "Completion rule pending"
-            data_status = "rules-pending"
+            state_label = "Locked"
+            badge_label = "LOCK"
+        state_class = f"bp-state-{status}"
+        ignored_class = " bp-has-ignored" if ignored_count else ""
 
         stage = STAGE_DETAILS[tile.stage]
-        unlock_note = stage["unlock"]
-        if tile.always_available:
-            unlock_note = "Available from event start using the team's one starting CG chest."
-
-        duplicate_note = ""
-        if tile.canonical_key in DUPLICATE_KEYS:
-            duplicate_note = (
-                '<div class="bp-note">This label appears in more than one board slot. '
-                "Slot assignment will be applied after the completion rules are configured.</div>"
-            )
-
-        rule_note = (
-            '<div class="bp-rule"><strong>Rule status:</strong> '
-            + _escape(rule_status.title())
-            + "</div>"
-        )
         aria_label = _escape(
-            f"{tile.label}. {state_label}. {submission_count} matched submission(s)."
+            f"{tile.label}. {state_label}. {completion_count} completing submission; "
+            f"{extra_count} additional; {ignored_count} ignored while locked."
         )
         tooltip_id = f"bp-tooltip-{tile.tile_id}"
-        count_badge = f'<span class="bp-count">{submission_count}</span>' if submission_count else ""
-        opening_badge = '<span class="bp-opening">OPEN</span>' if tile.always_available else ""
+        status_badge = (
+            f'<span class="bp-state-badge bp-badge-{status}" aria-hidden="true">'
+            f"{badge_label}</span>"
+        )
+        if tile.always_available and status == "available":
+            status_badge = (
+                '<span class="bp-state-badge bp-badge-available" '
+                'aria-hidden="true">OPEN</span>'
+            )
+        ignored_badge = (
+            f'<span class="bp-ignored-badge" aria-hidden="true">!{ignored_count}</span>'
+            if ignored_count
+            else ""
+        )
 
         tip_position = " bp-tip-left" if tile.left < 15 else " bp-tip-right" if tile.left > 78 else ""
         if tile.top < 40:
             tip_position += " bp-tip-below"
 
+        details: list[str] = []
+        if completion is not None:
+            details.extend(
+                [
+                    '<div class="bp-drop-title">Completing submission</div>',
+                    _submission_markup([completion]),
+                ]
+            )
+        elif status == "available":
+            details.append('<div class="bp-empty">No accepted submission yet.</div>')
+        else:
+            details.append('<div class="bp-empty">This tile cannot accept a submission yet.</div>')
+
+        if extras:
+            details.extend(
+                [
+                    '<div class="bp-drop-title">Additional submissions (no extra progress)</div>',
+                    _submission_markup(extras),
+                ]
+            )
+        if ignored:
+            details.extend(
+                [
+                    f'<div class="bp-drop-title bp-ignored-title">Ignored while locked ({ignored_count})</div>',
+                    '<div class="bp-note bp-ignored-note">These rows did not count and were not banked. '
+                    + _escape(_locked_reason(tile.tile_id))
+                    + "</div>",
+                    _submission_markup(ignored),
+                ]
+            )
+
         hotspots.append(
-            f'<div class="bp-hotspot {state_class}" '
-            f'data-tile-id="{tile.tile_id}" data-status="{data_status}" '
-            f'data-submission-count="{submission_count}" tabindex="0" role="group" '
+            f'<div class="bp-hotspot {state_class}{ignored_class}" '
+            f'data-tile-id="{tile.tile_id}" data-status="{status}" '
+            f'data-submission-count="{completion_count}" data-extra-count="{extra_count}" '
+            f'data-ignored-count="{ignored_count}" '
+            f'tabindex="0" role="group" '
             f'aria-label="{aria_label}" aria-describedby="{tooltip_id}" '
             f'style="left:{tile.left}%;top:{tile.top}%;width:{tile.width}%;height:{tile.height}%">'
-            + count_badge
-            + opening_badge
-            + f'<div class="bp-tooltip{tip_position}" id="{tooltip_id}" role="tooltip">'
+            + status_badge
+            + ignored_badge
+            + f'<div class="bp-tooltip{tip_position}" id="{tooltip_id}" role="region" '
+            + f'tabindex="0" aria-label="{_escape(tile.label)} details">'
             + f'<div class="bp-tooltip-title">{_escape(tile.label)}</div>'
             + f'<div class="bp-section">{_escape(stage["label"])}</div>'
             + f'<div class="bp-status">{_escape(state_label)}</div>'
-            + f'<div class="bp-unlock"><strong>Board gate:</strong> {_escape(unlock_note)}</div>'
-            + rule_note
-            + duplicate_note
-            + f'<div class="bp-drop-title">Matched submissions ({submission_count})</div>'
-            + _submission_markup(submissions)
+            + f'<div class="bp-unlock"><strong>Board gate:</strong> {_escape(_gate_text(tile.tile_id))}</div>'
+            + "".join(details)
             + "</div></div>"
         )
 
@@ -390,7 +656,7 @@ def render_board_html(
     return f"""
 <style>
   .bp-shell {{ margin: 0.25rem 0 0.5rem; }}
-  .bp-team-label {{ color: #64748b; font-size: 0.86rem; margin: 0 0 0.4rem; }}
+  .bp-team-label {{ color: #94a3b8; font-size: 0.86rem; margin: 0 0 0.4rem; }}
   .bp-board-scroll {{ overflow-x: auto; overflow-y: hidden; padding-bottom: 0.35rem; }}
   .bp-board {{
     position: relative;
@@ -411,30 +677,32 @@ def render_board_html(
     outline: none;
     transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
   }}
-  .bp-state-pending {{ border: 2px dashed rgba(226,232,240,.78); background: rgba(15,23,42,.12); }}
-  .bp-state-opening {{ border: 3px solid #fbbf24; background: rgba(251,191,36,.16); }}
-  .bp-state-submitted {{ border: 3px solid #38bdf8; background: rgba(14,165,233,.17); }}
-  .bp-state-shared {{ border: 3px solid #c084fc; background: rgba(168,85,247,.18); }}
+  .bp-state-complete {{ border: 3px solid #22c55e; background-color: rgba(34,197,94,.24); }}
+  .bp-state-available {{ border: 3px solid #f59e0b; background-color: rgba(245,158,11,.16); }}
+  .bp-state-locked {{ border: 2px dashed #94a3b8; background-color: rgba(15,23,42,.52); }}
+  .bp-has-ignored {{
+    background-image: repeating-linear-gradient(135deg, rgba(251,113,133,.20) 0 5px, transparent 5px 10px);
+  }}
   .bp-hotspot:hover, .bp-hotspot:focus, .bp-hotspot:focus-within {{
     z-index: 100;
     box-shadow: 0 0 0 3px rgba(255,255,255,.86), 0 10px 30px rgba(0,0,0,.45);
   }}
-  .bp-count, .bp-opening {{
+  .bp-state-badge, .bp-ignored-badge {{
     position: absolute;
-    top: -9px;
     min-width: 21px;
     height: 21px;
     padding: 0 5px;
     border-radius: 999px;
-    color: #082f49;
-    background: #bae6fd;
     border: 2px solid white;
-    font: 800 11px/17px system-ui, sans-serif;
+    font: 800 9px/17px system-ui, sans-serif;
     text-align: center;
     box-sizing: border-box;
   }}
-  .bp-count {{ right: -9px; }}
-  .bp-opening {{ left: -10px; color: #422006; background: #fde68a; font-size: 9px; }}
+  .bp-state-badge {{ top: 3px; right: 3px; }}
+  .bp-badge-complete {{ color: #052e16; background: #86efac; }}
+  .bp-badge-available {{ color: #451a03; background: #fcd34d; }}
+  .bp-badge-locked {{ color: #0f172a; background: #cbd5e1; }}
+  .bp-ignored-badge {{ right: 3px; bottom: 3px; color: #4c0519; background: #fda4af; }}
   .bp-tooltip {{
     position: absolute;
     bottom: calc(100% + 8px);
@@ -474,8 +742,10 @@ def render_board_html(
   .bp-tooltip-title {{ font-size: 15px; font-weight: 850; letter-spacing: .02em; color: white; }}
   .bp-section {{ color: #7dd3fc; font-weight: 700; margin: 1px 0 7px; }}
   .bp-status {{ color: #fde68a; margin-bottom: 7px; }}
-  .bp-unlock, .bp-rule, .bp-note {{ color: #cbd5e1; margin: 5px 0; }}
+  .bp-unlock, .bp-note {{ color: #cbd5e1; margin: 5px 0; }}
   .bp-note {{ padding: 6px 7px; border-radius: 6px; background: rgba(30,41,59,.9); }}
+  .bp-ignored-title {{ color: #fda4af; }}
+  .bp-ignored-note {{ border-left: 3px solid #fb7185; }}
   .bp-drop-title {{ margin-top: 9px; padding-top: 8px; border-top: 1px solid #334155; font-weight: 750; }}
   .bp-submissions {{ margin: 6px 0 0; padding-left: 18px; }}
   .bp-submissions li {{ margin: 0 0 7px; padding-left: 2px; }}
@@ -484,12 +754,12 @@ def render_board_html(
   .bp-item {{ color: #bae6fd; }}
   .bp-date {{ color: #94a3b8; font-size: 11px; }}
   .bp-more, .bp-empty {{ color: #94a3b8; font-style: italic; }}
-  .bp-legend {{ display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 7px; color: #64748b; font-size: 12px; }}
+  .bp-legend {{ display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 7px; color: #94a3b8; font-size: 12px; }}
   .bp-legend span::before {{ content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 5px; border-radius: 3px; vertical-align: -1px; }}
-  .bp-legend-submitted::before {{ background: #38bdf8; }}
-  .bp-legend-shared::before {{ background: #c084fc; }}
-  .bp-legend-opening::before {{ background: #fbbf24; }}
-  .bp-legend-pending::before {{ background: #94a3b8; }}
+  .bp-legend-complete::before {{ background: #22c55e; }}
+  .bp-legend-available::before {{ background: #f59e0b; }}
+  .bp-legend-locked::before {{ background: #94a3b8; }}
+  .bp-legend-ignored::before {{ background: #fb7185; }}
   @media (max-width: 900px) {{
     .bp-board-scroll {{ margin-right: -1rem; padding-right: 1rem; }}
     .bp-tooltip {{ width: 250px; max-height: 180px; }}
@@ -497,7 +767,7 @@ def render_board_html(
   }}
 </style>
 <div class="bp-shell">
-  <div class="bp-team-label">Board preview for <strong>{safe_team}</strong> — hover, tap, or keyboard-focus a tile.</div>
+  <div class="bp-team-label">Board progress for <strong>{safe_team}</strong> — hover, tap, or keyboard-focus a tile.</div>
   <div class="bp-board-scroll">
     <div class="bp-board">
       <img class="bp-board-image" src="{image_uri}" alt="BapHeads Summer Bingo 2026 board">
@@ -505,22 +775,10 @@ def render_board_html(
     </div>
   </div>
   <div class="bp-legend">
-    <span class="bp-legend-submitted">Matched submissions (not completion)</span>
-    <span class="bp-legend-shared">Shared TOA/TOB/COX submissions</span>
-    <span class="bp-legend-opening">CG opening exception</span>
-    <span class="bp-legend-pending">Rule pending</span>
+    <span class="bp-legend-complete">Provisional complete</span>
+    <span class="bp-legend-available">Available now</span>
+    <span class="bp-legend-locked">Locked</span>
+    <span class="bp-legend-ignored">Ignored early submission</span>
   </div>
 </div>
 """
-
-
-def board_submission_summary(
-    grouped_submissions: dict[str, list[dict[str, Any]]],
-    unmatched: pd.DataFrame,
-) -> dict[str, int]:
-    return {
-        "matched_submissions": sum(len(rows) for rows in grouped_submissions.values()),
-        "matched_tile_types": len(grouped_submissions),
-        "unmatched_submissions": len(unmatched),
-        "cg_submissions": len(grouped_submissions.get("corrupted_gauntlet", [])),
-    }

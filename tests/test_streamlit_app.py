@@ -21,7 +21,7 @@ class StreamlitAppTests(unittest.TestCase):
         board_markup = next(markdown.value for markdown in app.markdown if 'data-tile-id="start_toa"' in markdown.value)
         self.assertEqual(board_markup.count('data-tile-id="'), 31)
 
-    def test_uploaded_csv_shows_raw_cg_drop_without_claiming_completion(self):
+    def test_uploaded_csv_completes_opening_cg_and_escapes_hover_content(self):
         csv_text = """Date,Player Name,Team,Tile,Item Received
 29/08/2026 14:30,<script>alert(1)</script>,AOCL,CG,Armour seed & pet
 29/08/2026 14:31,Second Player,MASELF,Nex,Nihil horn
@@ -34,12 +34,40 @@ class StreamlitAppTests(unittest.TestCase):
         board_markup = next(markdown.value for markdown in app.markdown if 'data-tile-id="start_toa"' in markdown.value)
         self.assertIn(
             'data-tile-id="final_corrupted_gauntlet" '
-            'data-status="submitted-rules-pending" data-submission-count="1"',
+            'data-status="complete" data-submission-count="1"',
             board_markup,
         )
+        self.assertIn('data-tile-id="start_toa" data-status="available"', board_markup)
+        self.assertIn('data-tile-id="final_araxxor" data-status="locked"', board_markup)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", board_markup)
         self.assertNotIn("<script>alert(1)</script>", board_markup)
-        self.assertNotIn("state-complete", board_markup)
+        self.assertTrue(
+            any("first eligible submission finishes a tile" in info.value for info in app.info)
+        )
+
+    def test_partial_entry_numbers_fall_back_to_source_order(self):
+        csv_text = """Entry #,Date,Player Name,Team,Tile,Item Received
+100,29/08/2026 10:00,Early Nex,AOCL,Nex,EARLY_NEX
+,29/08/2026 10:01,Starter,AOCL,TOA,START_TOA
+101,29/08/2026 10:02,Valid Nex,AOCL,Nex,VALID_NEX
+"""
+        app = AppTest.from_file(str(PROJECT_DIR / "bingostats.py"), default_timeout=30).run()
+        app.file_uploader[0].set_value(
+            ("partial_entries.csv", csv_text.encode("utf-8"), "text/csv")
+        ).run()
+
+        self.assertEqual(len(app.exception), 0)
+        board_markup = next(
+            markdown.value
+            for markdown in app.markdown
+            if 'data-tile-id="start_toa"' in markdown.value
+        )
+        self.assertIn(
+            'data-tile-id="start_nex" data-status="complete" '
+            'data-submission-count="1" data-extra-count="0" data-ignored-count="1"',
+            board_markup,
+        )
+        self.assertIn("VALID_NEX", board_markup)
 
     def test_example_csv_can_select_fiddlstcks_and_render_all_hotspots(self):
         app = AppTest.from_file(str(PROJECT_DIR / "bingostats.py"), default_timeout=30).run()
@@ -57,7 +85,22 @@ class StreamlitAppTests(unittest.TestCase):
             if 'data-tile-id="start_toa"' in markdown.value
         )
         self.assertEqual(board_markup.count('data-tile-id="'), 31)
-        self.assertIn("Board preview for <strong>FIDDLSTCKS</strong>", board_markup)
+        self.assertEqual(board_markup.count('data-status="complete"'), 31)
+        self.assertIn("Board progress for <strong>FIDDLSTCKS</strong>", board_markup)
+        self.assertTrue(any("Everything is finished" in caption.value for caption in app.caption))
+
+        app.selectbox(key="board_team").set_value("REX IM").run()
+        rex_markup = next(
+            markdown.value
+            for markdown in app.markdown
+            if 'data-tile-id="start_toa"' in markdown.value
+        )
+        self.assertEqual(rex_markup.count('data-status="complete"'), 15)
+        self.assertIn('data-tile-id="path_voidwaker" data-status="available"', rex_markup)
+        self.assertIn(
+            'data-tile-id="final_corrupted_gauntlet" data-status="available"',
+            rex_markup,
+        )
 
 
 if __name__ == "__main__":

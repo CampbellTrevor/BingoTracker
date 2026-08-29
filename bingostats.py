@@ -5,7 +5,6 @@ from pathlib import Path
 import time
 import re
 import json
-import ast
 import requests
 
 # --- Page Configuration ---
@@ -13,10 +12,8 @@ st.set_page_config(page_title="OSRS Bingo Tracker", layout="wide", page_icon="�
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_CSV_PATH = APP_DIR / "Copy of Copy of Winter Bingo 2026 - Event Log - New Log.csv"
 WOM_CACHE_FILE = APP_DIR / "wom_group_cache.json"
-MESSAGE_CONFIG_FILE = APP_DIR / "message.txt"
 WOM_API_BASE_URL = "https://api.wiseoldman.net/v2"
 WOM_GROUP_ID = 11794
-WOM_COMPETITION_ID = 124486
 WOM_MAX_RETRIES = 5
 WOM_BASE_BACKOFF_SECONDS = 1.5
 WOM_PLAYER_ALIASES = {
@@ -63,51 +60,6 @@ CATEGORY_TO_WOM_BOSSES = {
     "Nightmare / PNM": ["nightmare", "phosanis_nightmare"],
     "Theatre of Blood": ["theatre_of_blood", "theatre_of_blood_hard_mode"],
     "Zalcano": ["zalcano"],
-}
-
-# Maps message.txt source names to WOM metric names.
-SOURCE_TO_WOM_METRIC = {
-    "nightmare": "nightmare",
-    "phosanisnightmare": "phosanis_nightmare",
-    "barrowschests": "barrows_chests",
-    "lunarchests": "lunar_chests",
-    "commanderzilyana": "commander_zilyana",
-    "generalgraardor": "general_graardor",
-    "kreearra": "kreearra",
-    "kriltsutsaroth": "kril_tsutsaroth",
-    "yama": "yama",
-    "theroyaltitans": "the_royal_titans",
-    "doomofmokhaiotl": "doom_of_mokhaiotl",
-    "tempoross": "tempoross",
-    "wintertodt": "wintertodt",
-    "zalcano": "zalcano",
-    "chambersofxeric": "chambers_of_xeric",
-    "chambersofxericchallengemode": "chambers_of_xeric_challenge_mode",
-    "tombsofamascut": "tombs_of_amascut",
-    "tombsofamascutexpert": "tombs_of_amascut_expert",
-    "theatreofblood": "theatre_of_blood",
-    "theatreofbloodhardmode": "theatre_of_blood_hard_mode",
-    "vardorvis": "vardorvis",
-    "theleviathan": "the_leviathan",
-    "dukesucellus": "duke_sucellus",
-    "thewhisperer": "the_whisperer",
-    "alchemicalhydra": "alchemical_hydra",
-    "cerberus": "cerberus",
-    "araxxor": "araxxor",
-    "thermonuclearsmokedevil": "thermonuclear_smoke_devil",
-    "abyssalsire": "abyssal_sire",
-    "kraken": "kraken",
-    "zulrah": "zulrah",
-    "vorkath": "vorkath",
-    "solheredit": "sol_heredit",
-    "tzkalzuk": "tzkal_zuk",
-    "nex": "nex",
-    "artio": "artio",
-    "callisto": "callisto",
-    "calvarion": "calvarion",
-    "vetion": "vetion",
-    "spindel": "spindel",
-    "venenatis": "venenatis",
 }
 
 # --- 1. Data Cleaning Engine ---
@@ -365,189 +317,6 @@ def load_wom_group_metrics_from_file(cache_path, group_id, start_date_str, end_d
     return kc_by_metric, notes
 
 
-def _extract_braced_literal(text, variable_name):
-    marker = f"{variable_name} ="
-    start_idx = text.find(marker)
-    if start_idx < 0:
-        return None
-    brace_start = text.find("{", start_idx)
-    if brace_start < 0:
-        return None
-
-    depth = 0
-    for idx in range(brace_start, len(text)):
-        ch = text[idx]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[brace_start:idx + 1]
-    return None
-
-
-@st.cache_data(ttl=3600)
-def load_spoon_config_from_message(file_path):
-    path = Path(file_path)
-    if not path.exists():
-        return {}, {}, [f"Missing config file: {path.name}"]
-
-    try:
-        raw = path.read_text(encoding="utf-8-sig")
-    except Exception as exc:
-        return {}, {}, [f"Failed to read {path.name}: {exc}"]
-
-    notes = []
-    speeds_literal = _extract_braced_literal(raw, "boss_speeds")
-    items_literal = _extract_braced_literal(raw, "items_db")
-
-    boss_speeds = {}
-    items_db = {}
-    if speeds_literal:
-        try:
-            boss_speeds = ast.literal_eval(speeds_literal)
-        except Exception as exc:
-            notes.append(f"Could not parse boss_speeds in {path.name}: {exc}")
-    else:
-        notes.append(f"boss_speeds section missing in {path.name}")
-
-    if items_literal:
-        try:
-            items_db = ast.literal_eval(items_literal)
-        except Exception as exc:
-            notes.append(f"Could not parse items_db in {path.name}: {exc}")
-    else:
-        notes.append(f"items_db section missing in {path.name}")
-
-    if not isinstance(boss_speeds, dict):
-        notes.append("boss_speeds is not a dictionary")
-        boss_speeds = {}
-    if not isinstance(items_db, dict):
-        notes.append("items_db is not a dictionary")
-        items_db = {}
-
-    return boss_speeds, items_db, notes
-
-
-def _norm_source_name(name):
-    return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
-
-
-def _build_metric_drop_profile(items_db):
-    profile = {}
-    for item_data in items_db.values():
-        if not isinstance(item_data, dict):
-            continue
-        points = float(item_data.get("points") or 0)
-        rate = float(item_data.get("rate") or 0)
-        sources = item_data.get("sources") or []
-        if points <= 0 or rate <= 0 or not isinstance(sources, list):
-            continue
-
-        points_per_kc = points / rate
-        for source_name in sources:
-            source_key = _norm_source_name(source_name)
-            metric_name = SOURCE_TO_WOM_METRIC.get(source_key)
-            if not metric_name:
-                continue
-            profile[metric_name] = profile.get(metric_name, 0.0) + points_per_kc
-    return profile
-
-
-def build_spooned_index(
-    category_df,
-    selected_boss_metrics,
-    prefetched_kc_by_metric,
-    boss_speeds,
-    items_db
-):
-    if category_df.empty:
-        return pd.DataFrame(), None, None, []
-
-    start_date = category_df["Date"].min()
-    end_date = category_df["Date"].max()
-    errors = []
-    valid_metrics = [m for m in selected_boss_metrics if m in SUPPORTED_WOM_BOSS_METRICS]
-    unsupported_metrics = sorted(set(selected_boss_metrics) - set(valid_metrics))
-    if unsupported_metrics:
-        errors.append("Unsupported WOM metrics skipped: " + ", ".join(unsupported_metrics))
-
-    speed_by_metric = {}
-    for boss_name, speed in boss_speeds.items():
-        metric_name = SOURCE_TO_WOM_METRIC.get(_norm_source_name(boss_name))
-        if metric_name:
-            try:
-                speed_by_metric[metric_name] = float(speed or 0)
-            except (TypeError, ValueError):
-                speed_by_metric[metric_name] = 0.0
-    points_per_kc_by_metric = _build_metric_drop_profile(items_db)
-
-    kc_by_player = {}
-    ehb_hours_by_player = {}
-    expected_points_by_player = {}
-    for metric_name in valid_metrics:
-        metric_gains = prefetched_kc_by_metric.get(metric_name, {})
-        metric_speed = speed_by_metric.get(metric_name, 0.0)
-        metric_points_per_kc = points_per_kc_by_metric.get(metric_name, 0.0)
-
-        for normalized_player, gained_value in metric_gains.items():
-            kc_gain = float(gained_value or 0)
-            kc_by_player[normalized_player] = kc_by_player.get(normalized_player, 0.0) + kc_gain
-            expected_points_by_player[normalized_player] = (
-                expected_points_by_player.get(normalized_player, 0.0) + (kc_gain * metric_points_per_kc)
-            )
-            if metric_speed > 0:
-                ehb_hours_by_player[normalized_player] = (
-                    ehb_hours_by_player.get(normalized_player, 0.0) + (kc_gain / metric_speed)
-                )
-
-    rows = []
-    missing_from_wom = []
-    for player in sorted(category_df["Player"].dropna().unique()):
-        player_points = float(category_df.loc[category_df["Player"] == player, "Points"].sum())
-        wom_lookup_key = _resolve_csv_player_to_wom_key(player)
-        player_kc_gain = kc_by_player.get(wom_lookup_key, 0.0)
-        player_ehb_hours = ehb_hours_by_player.get(wom_lookup_key, 0.0)
-        player_expected_points = expected_points_by_player.get(wom_lookup_key, 0.0)
-        if player_kc_gain == 0 and player_points > 0:
-            missing_from_wom.append(str(player))
-        spooned_index = (player_points / player_kc_gain) if player_kc_gain > 0 else None
-        rate_luck_index = (player_points / player_expected_points) if player_expected_points > 0 else None
-
-        rows.append(
-            {
-                "Player": player,
-                "Points": round(player_points, 2),
-                "KC Gain": round(player_kc_gain, 2),
-                "EHB Hours": round(player_ehb_hours, 2),
-                "Expected Points": round(player_expected_points, 2),
-                "Spooned Index": round(spooned_index, 3) if spooned_index is not None else None,
-                "Rate Luck Index": round(rate_luck_index, 3) if rate_luck_index is not None else None,
-            }
-        )
-
-    spoon_df = pd.DataFrame(rows)
-    if spoon_df.empty:
-        return spoon_df, start_date, end_date, errors
-
-    spoon_df = spoon_df.sort_values(
-        by=["Rate Luck Index", "Spooned Index", "Points"],
-        ascending=[False, False, False],
-        na_position="last",
-    ).reset_index(drop=True)
-    spoon_df.insert(0, "Rank", range(1, len(spoon_df) + 1))
-
-    if missing_from_wom:
-        missing_display = ", ".join(sorted(set(missing_from_wom))[:12])
-        errors.append(
-            "No WOM gained rows for: "
-            + missing_display
-            + ". This can mean zero KC gained in the selected date range or a name mismatch. "
-            + "Use WOM_PLAYER_ALIASES to map CSV names to WOM names."
-        )
-
-    return spoon_df, start_date, end_date, errors
-
 # --- 2. App Interface ---
 def main():
     st.markdown("### Summer Bingo 2026 Dashboard")
@@ -604,17 +373,16 @@ def main():
                     if metric in SUPPORTED_WOM_BOSS_METRICS
                 }
             )
-            prefetched_kc_by_metric, prefetch_errors = load_wom_group_metrics_from_file(
+            prefetched_kc_by_metric, _ = load_wom_group_metrics_from_file(
                 str(WOM_CACHE_FILE),
                 WOM_GROUP_ID,
                 event_start_date_str,
                 event_end_date_str,
                 tuple(prefetch_metrics)
             )
-            boss_speeds, items_db, message_config_notes = load_spoon_config_from_message(str(MESSAGE_CONFIG_FILE))
 
             # --- TABS ---
-            tab_leader, tab_player_leaderboard, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_highest_kc, tab_spooned, tab_raw = st.tabs([
+            tab_leader, tab_player_leaderboard, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_highest_kc, tab_raw = st.tabs([
                 "🏆 Leaderboards",
                 "📋 Player Leaderboard",
                 "📦 Item Stats",
@@ -622,7 +390,6 @@ def main():
                 "📊 Player Rankings",
                 "👥 Team Rankings",
                 "⚔️ Highest KC",
-                "🥄 Spooned Index",
                 "💾 Cleaned Data"
             ])
 
@@ -957,97 +724,7 @@ def main():
                 else:
                     st.info("No categories available for Highest KC view.")
 
-            # TAB 8: SPOONED INDEX
-            with tab_spooned:
-                st.subheader("Biggest Spoons by Boss KC Gain")
-                st.caption(
-                    f"Using Wise Old Man group pulls (group {WOM_GROUP_ID}, competition ref {WOM_COMPETITION_ID}) "
-                    "from a committed cache file for fast category switching."
-                )
-                st.caption(
-                    f"Cached WOM event range: {event_start_date_str} to {event_end_date_str} "
-                    f"({len(prefetch_metrics)} metrics) from {WOM_CACHE_FILE.name}"
-                )
-                available_spoon_categories = (
-                    sorted(
-                        [cat for cat in df["Category"].dropna().unique() if cat in CATEGORY_TO_WOM_BOSSES]
-                    )
-                    if has_points
-                    else []
-                )
-
-                if available_spoon_categories:
-                    selected_spoon_category = st.selectbox(
-                        "Choose a Boss Category",
-                        available_spoon_categories,
-                        key="spoon_category"
-                    )
-                    selected_metrics = CATEGORY_TO_WOM_BOSSES[selected_spoon_category]
-
-                    spoon_category_df = df[df["Category"] == selected_spoon_category].copy()
-                    spoon_df, start_date, end_date, fetch_errors = build_spooned_index(
-                        spoon_category_df,
-                        selected_metrics,
-                        prefetched_kc_by_metric,
-                        boss_speeds,
-                        items_db
-                    )
-
-                    if start_date is not None and end_date is not None:
-                        st.caption(
-                            f"Wise Old Man KC range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
-                        )
-
-                    if not spoon_df.empty:
-                        display_df = spoon_df.copy()
-                        display_df["Rate Luck Index"] = display_df["Rate Luck Index"].fillna(0)
-                        table_df = spoon_df.copy()
-                        table_df["WoM Data Status"] = ""
-                        table_df.loc[
-                            (table_df["Points"] > 0)
-                            & ((table_df["KC Gain"] <= 0) | (table_df["Expected Points"] <= 0)),
-                            "WoM Data Status"
-                        ] = "No WoM Data"
-
-                        fig_spoon = px.bar(
-                            display_df.head(15),
-                            x="Rate Luck Index",
-                            y="Player",
-                            orientation="h",
-                            text="Rate Luck Index",
-                            color="Rate Luck Index",
-                            title=f"Top Spoons (Rate-Aware) - {selected_spoon_category}"
-                        )
-                        fig_spoon.update_layout(yaxis={"categoryorder": "total ascending"})
-                        st.plotly_chart(fig_spoon, use_container_width=True)
-                        st.dataframe(table_df, hide_index=True, use_container_width=True)
-                    else:
-                        st.info("No spooned index rows were generated for this category.")
-
-                    all_wom_notes = prefetch_errors + message_config_notes + fetch_errors
-                    if all_wom_notes:
-                        request_failures = [
-                            e for e in all_wom_notes
-                            if "request failed" in e.lower() or "rate limited" in e.lower()
-                        ]
-                        warning_title = (
-                            "Some Wise Old Man metric pulls failed after automatic retries. Results may be incomplete.\n"
-                            if request_failures
-                            else "Wise Old Man notes for this result:\n"
-                        )
-                        st.warning(
-                            warning_title
-                            + "\n".join(all_wom_notes[:10])
-                        )
-                elif not has_points:
-                    st.info(
-                        "The point-based spooned index is paused for tile-race CSVs. "
-                        "It can be replaced once the new event rules are finalized."
-                    )
-                else:
-                    st.info("No boss categories mapped for Wise Old Man spooned index yet.")
-
-            # TAB 9: RAW DATA
+            # TAB 8: RAW DATA
             with tab_raw:
                 if has_points:
                     st.write("Cleaned Data (Using legacy point scoring):")

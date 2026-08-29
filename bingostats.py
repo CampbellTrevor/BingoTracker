@@ -550,7 +550,7 @@ def build_spooned_index(
 
 # --- 2. App Interface ---
 def main():
-    st.markdown("### Winter Bingo 2026 Dashboard")
+    st.markdown("### Summer Bingo 2026 Dashboard")
     
     # Sidebar
     with st.sidebar:

@@ -7,11 +7,22 @@ import re
 import json
 import requests
 
+from board_progress import (
+    BOARD_TILES,
+    board_readiness_rows,
+    board_submission_summary,
+    index_team_submissions,
+    load_tile_rules,
+    render_board_html,
+)
+
 # --- Page Configuration ---
 st.set_page_config(page_title="OSRS Bingo Tracker", layout="wide", page_icon="⚔️")
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_CSV_PATH = APP_DIR / "Copy of Copy of Winter Bingo 2026 - Event Log - New Log.csv"
 WOM_CACHE_FILE = APP_DIR / "wom_group_cache.json"
+BOARD_IMAGE_FILE = APP_DIR / "assets" / "bingoboard.png"
+TILE_RULES_FILE = APP_DIR / "tile_rules.json"
 WOM_API_BASE_URL = "https://api.wiseoldman.net/v2"
 WOM_GROUP_ID = 11794
 WOM_MAX_RETRIES = 5
@@ -78,8 +89,19 @@ def load_and_clean_data(file):
             )
             return pd.DataFrame(), False
 
+        # Preserve chronological source order before selecting/renaming columns.
+        # A numeric Entry # is preferred when the existing CSV happens to carry
+        # one, but it is not required by the Summer CSV contract.
+        df['_Source_Order'] = range(len(df))
+        if 'Entry #' in df.columns:
+            entry_order = pd.to_numeric(df['Entry #'], errors='coerce')
+            df['Submission_Order'] = entry_order.fillna(df['_Source_Order'])
+        else:
+            df['Submission_Order'] = df['_Source_Order']
+
         # Remove the malformed/test row used by the previous event export.
-        df = df[df['Team'] != '-']
+        cleaned_team = df['Team'].fillna('').astype(str).str.strip()
+        df = df[cleaned_team != '-'].copy()
 
         # Point columns are optional for tile-race events. Preserve the previous
         # event's awarded-points behavior when either legacy column is present.
@@ -95,23 +117,27 @@ def load_and_clean_data(file):
             # structurally compatible until the tile-race rules are finalized.
             df['Final_Points'] = 0
 
-        target_cols = required_cols + ['Final_Points']
+        target_cols = required_cols + ['Final_Points', 'Submission_Order']
 
         df = df[target_cols]
         
         # 3. RENAME: Standardize
-        df.columns = ['Date', 'Player', 'Team', 'Category', 'Item', 'Points']
-        df['Player'] = (
-            df['Player']
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .str.replace(r'\s+', '', regex=True)
+        df = df.rename(
+            columns={
+                'Player Name': 'Player',
+                'Tile': 'Category',
+                'Item Received': 'Item',
+                'Final_Points': 'Points',
+            }
         )
+        for text_column in ('Player', 'Team', 'Category', 'Item'):
+            df[text_column] = df[text_column].fillna('').astype(str).str.strip()
+        df['Player_Key'] = df['Player'].map(_normalize_name)
         
         # 4. FORMAT: Convert types
         df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
         df['Points'] = pd.to_numeric(df['Points'], errors='coerce').fillna(0)
+        df['Submission_Order'] = pd.to_numeric(df['Submission_Order'], errors='coerce')
         df['Quantity'] = 1
         
         return df, has_points
@@ -275,6 +301,7 @@ def load_wom_group_metrics_from_file(cache_path, group_id, start_date_str, end_d
         return {}, [f"Failed to read WOM cache file: {exc}"]
 
     notes = []
+    cache_compatible = True
     file_group_id = payload.get("group_id")
     file_start = payload.get("start_date")
     file_end = payload.get("end_date")
@@ -282,6 +309,7 @@ def load_wom_group_metrics_from_file(cache_path, group_id, start_date_str, end_d
 
     if file_group_id != group_id:
         notes.append(f"WOM cache group_id mismatch (file={file_group_id}, app={group_id})")
+        cache_compatible = False
     try:
         app_start = pd.to_datetime(start_date_str).date()
         app_end = pd.to_datetime(end_date_str).date()
@@ -291,12 +319,16 @@ def load_wom_group_metrics_from_file(cache_path, group_id, start_date_str, end_d
             notes.append(
                 f"WOM cache date range mismatch (file={file_start}..{file_end}, app={start_date_str}..{end_date_str})"
             )
+            cache_compatible = False
     except Exception:
         notes.append(
             f"WOM cache date range mismatch (file={file_start}..{file_end}, app={start_date_str}..{end_date_str})"
         )
+        cache_compatible = False
     if not isinstance(file_metrics, dict):
         return {}, notes + ["WOM cache format invalid: metrics should be an object"]
+    if not cache_compatible:
+        return {}, notes
 
     kc_by_metric = {}
     for metric_name in metrics:
@@ -326,9 +358,15 @@ def main():
         st.header("Data Source")
         uploaded_file = st.file_uploader("Optional: Upload a replacement CSV", type=['csv'])
 
+    using_bundled_archive = uploaded_file is None and DEFAULT_CSV_PATH.exists()
     data_source = uploaded_file if uploaded_file is not None else (DEFAULT_CSV_PATH if DEFAULT_CSV_PATH.exists() else None)
 
     if data_source is not None:
+        if using_bundled_archive:
+            st.warning(
+                "No Summer event log is uploaded. The dashboard is showing the bundled prior-event "
+                "archive as demo data; it is not current Summer progress."
+            )
         df, has_points = load_and_clean_data(data_source)
         
         if not df.empty:
@@ -341,7 +379,7 @@ def main():
             if has_points:
                 col2.metric("Total Points", f"{int(df['Points'].sum()):,}")
             else:
-                col2.metric("Unique Tiles", f"{df['Category'].nunique():,}")
+                col2.metric("Submitted Tile Names", f"{df['Category'].nunique():,}")
 
             player_activity = df.groupby('Player')[activity_col].sum()
             top_player = player_activity.idxmax()
@@ -361,8 +399,14 @@ def main():
             )
 
             st.divider()
-            event_start_date = df["Date"].min()
-            event_end_date = df["Date"].max()
+            valid_event_dates = df["Date"].dropna()
+            if valid_event_dates.empty:
+                fallback_date = pd.Timestamp.today().normalize()
+                event_start_date = fallback_date
+                event_end_date = fallback_date
+            else:
+                event_start_date = valid_event_dates.min()
+                event_end_date = valid_event_dates.max()
             event_start_date_str = event_start_date.strftime("%Y-%m-%d")
             event_end_date_str = event_end_date.strftime("%Y-%m-%d")
             prefetch_metrics = sorted(
@@ -373,7 +417,7 @@ def main():
                     if metric in SUPPORTED_WOM_BOSS_METRICS
                 }
             )
-            prefetched_kc_by_metric, _ = load_wom_group_metrics_from_file(
+            prefetched_kc_by_metric, wom_cache_notes = load_wom_group_metrics_from_file(
                 str(WOM_CACHE_FILE),
                 WOM_GROUP_ID,
                 event_start_date_str,
@@ -381,8 +425,11 @@ def main():
                 tuple(prefetch_metrics)
             )
 
+            board_rules = load_tile_rules(TILE_RULES_FILE)
+
             # --- TABS ---
-            tab_leader, tab_player_leaderboard, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_highest_kc, tab_raw = st.tabs([
+            tab_board, tab_leader, tab_player_leaderboard, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_highest_kc, tab_raw = st.tabs([
+                "🗺️ Board Progress",
                 "🏆 Leaderboards",
                 "📋 Player Leaderboard",
                 "📦 Item Stats",
@@ -393,7 +440,90 @@ def main():
                 "💾 Cleaned Data"
             ])
 
-            # TAB 1: LEADERBOARDS
+            # BOARD PROGRESS PREVIEW
+            with tab_board:
+                st.subheader("Interactive Board Progress")
+                st.info(
+                    "Preparation mode: hover details show raw matched submissions, but no tile is "
+                    "marked complete until the official drop requirements are configured."
+                )
+
+                board_teams = sorted(team for team in df['Team'].dropna().unique() if str(team).strip())
+                if board_teams:
+                    selected_board_team = st.selectbox(
+                        "Choose a team",
+                        board_teams,
+                        key="board_team",
+                    )
+                    grouped_board_submissions, unmatched_board_submissions = index_team_submissions(
+                        df,
+                        selected_board_team,
+                    )
+                    board_summary = board_submission_summary(
+                        grouped_board_submissions,
+                        unmatched_board_submissions,
+                    )
+                    board_tile_type_count = len({tile.canonical_key for tile in BOARD_TILES})
+
+                    bm1, bm2, bm3, bm4 = st.columns(4)
+                    bm1.metric("Matched Submissions", board_summary['matched_submissions'])
+                    bm2.metric(
+                        "CSV Tile Names With Drops",
+                        f"{board_summary['matched_tile_types']}/{board_tile_type_count}",
+                    )
+                    bm3.metric("Unmatched Submissions", board_summary['unmatched_submissions'])
+                    bm4.metric("CG Submissions", board_summary['cg_submissions'])
+
+                    if BOARD_IMAGE_FILE.exists():
+                        st.markdown(
+                            render_board_html(
+                                BOARD_IMAGE_FILE,
+                                grouped_board_submissions,
+                                board_rules,
+                                selected_board_team,
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.error(f"Board image is missing: {BOARD_IMAGE_FILE.name}")
+
+                    st.caption(
+                        "Corrupted Gauntlet is explicitly flagged as available from the start using "
+                        "the team's one starting CG chest. TOA, TOB, and COX each appear twice; their "
+                        "raw submissions are visible on both matching slots until chronological slot "
+                        "assignment can be finalized from the tile rules."
+                    )
+
+                    with st.expander("Submission matching diagnostics"):
+                        if unmatched_board_submissions.empty:
+                            st.success("Every submission for this team matched a recognized board tile name.")
+                        else:
+                            st.warning(
+                                "These CSV tile names were not guessed because they do not map "
+                                "unambiguously to one board tile."
+                            )
+                            unmatched_counts = (
+                                unmatched_board_submissions['Category']
+                                .value_counts(dropna=False)
+                                .rename_axis('CSV Tile')
+                                .reset_index(name='Submissions')
+                            )
+                            st.dataframe(unmatched_counts, hide_index=True, width='stretch')
+
+                    with st.expander("Tile rule readiness (31 board slots)"):
+                        st.caption(
+                            "Each repeated tile has its own slot ID so its eventual completion "
+                            "requirements can differ by board position."
+                        )
+                        st.dataframe(
+                            pd.DataFrame(board_readiness_rows(board_rules)),
+                            hide_index=True,
+                            width='stretch',
+                        )
+                else:
+                    st.info("No teams are available in the current CSV.")
+
+            # LEADERBOARDS
             with tab_leader:
                 c1, c2 = st.columns(2)
                 
@@ -413,7 +543,7 @@ def main():
                         lambda x: int(x) if float(x).is_integer() else x
                     )
                     
-                    st.dataframe(team_df, use_container_width=True)
+                    st.dataframe(team_df, width='stretch')
 
                 with c2:
                     st.subheader("Top 10 Players")
@@ -434,7 +564,7 @@ def main():
                         color=activity_label
                     )
                     fig_player.update_layout(yaxis={'categoryorder':'total ascending'})
-                    st.plotly_chart(fig_player, use_container_width=True)
+                    st.plotly_chart(fig_player, width='stretch')
 
             # TAB 2: PLAYER LEADERBOARD
             with tab_player_leaderboard:
@@ -455,7 +585,7 @@ def main():
                 st.dataframe(
                     player_leaderboard_df[['Rank', 'Player', 'Team', 'Submissions']],
                     hide_index=True,
-                    use_container_width=True
+                    width='stretch'
                 )
 
             # TAB 3: ITEM STATS
@@ -475,7 +605,7 @@ def main():
                     
                     fig_items = px.bar(item_counts, x='Count', y='Item', orientation='h', title="Top Drops by Quantity")
                     fig_items.update_layout(yaxis={'categoryorder':'total ascending'})
-                    st.plotly_chart(fig_items, use_container_width=True)
+                    st.plotly_chart(fig_items, width='stretch')
                     
                     if has_points:
                         st.write("### High Value Drops")
@@ -483,7 +613,7 @@ def main():
                         st.dataframe(
                             high_value[['Date', 'Player', 'Item', 'Points']],
                             hide_index=True,
-                            use_container_width=True
+                            width='stretch'
                         )
                     else:
                         st.write("### Recent Submissions")
@@ -491,7 +621,7 @@ def main():
                         st.dataframe(
                             recent_submissions[['Date', 'Player', 'Category', 'Item']],
                             hide_index=True,
-                            use_container_width=True
+                            width='stretch'
                         )
 
             # TAB 4: INDIVIDUAL PLAYER
@@ -527,7 +657,7 @@ def main():
                         history_cols.append('Points')
                     st.dataframe(
                         p_data[history_cols].sort_values('Date', ascending=False),
-                        use_container_width=True
+                        width='stretch'
                     )
 
             # TAB 5: PLAYER RANKINGS
@@ -552,7 +682,7 @@ def main():
                     st.dataframe(
                         cat_rank_df[['Rank', 'Player', activity_label]],
                         hide_index=True,
-                        use_container_width=True
+                        width='stretch'
                     )
                 else:
                     st.info("No categories found in the uploaded data.")
@@ -579,7 +709,7 @@ def main():
                     st.dataframe(
                         item_rank_df[['Rank', 'Player', activity_label]],
                         hide_index=True,
-                        use_container_width=True
+                        width='stretch'
                     )
                 else:
                     st.info("No items found in the uploaded data.")
@@ -602,7 +732,7 @@ def main():
                     st.dataframe(
                         team_player_rank_df[['Rank', 'Player', activity_label]],
                         hide_index=True,
-                        use_container_width=True
+                        width='stretch'
                     )
 
                     st.divider()
@@ -636,11 +766,11 @@ def main():
                             title=f"{selected_team} - {selected_team_category}: {activity_label} by Item"
                         )
                         fig_team_items.update_layout(yaxis={'categoryorder': 'total ascending'})
-                        st.plotly_chart(fig_team_items, use_container_width=True)
+                        st.plotly_chart(fig_team_items, width='stretch')
                         st.dataframe(
                             team_item_activity_df[['Rank', 'Item', activity_label]],
                             hide_index=True,
-                            use_container_width=True
+                            width='stretch'
                         )
                     else:
                         st.info("No categories found for this team.")
@@ -654,6 +784,15 @@ def main():
                     f"Using cached WOM data from {WOM_CACHE_FILE.name} for range "
                     f"{event_start_date_str} to {event_end_date_str}."
                 )
+                if wom_cache_notes:
+                    if not prefetched_kc_by_metric:
+                        st.warning(
+                            "The cached Wise Old Man snapshot does not cover this event range, "
+                            "so prior-event KC is not being shown."
+                        )
+                    with st.expander("Wise Old Man cache notes"):
+                        for cache_note in wom_cache_notes:
+                            st.write(f"- {cache_note}")
 
                 available_kc_categories = sorted(
                     [
@@ -717,8 +856,8 @@ def main():
                             title=f"Top KC Gains - {selected_kc_category}"
                         )
                         fig_kc.update_layout(yaxis={"categoryorder": "total ascending"})
-                        st.plotly_chart(fig_kc, use_container_width=True)
-                        st.dataframe(kc_df, hide_index=True, use_container_width=True)
+                        st.plotly_chart(fig_kc, width='stretch')
+                        st.dataframe(kc_df, hide_index=True, width='stretch')
                     else:
                         st.info("No supported WOM boss metrics are mapped for this category.")
                 else:
@@ -732,10 +871,10 @@ def main():
                 else:
                     st.write("Cleaned Data (Tile-race preparation; no point columns required):")
                     display_cols = ['Date', 'Player', 'Team', 'Category', 'Item']
-                st.dataframe(df[display_cols], use_container_width=True)
+                st.dataframe(df[display_cols], width='stretch')
 
     else:
-        st.info(f"👋 No CSV available. Add {DEFAULT_CSV_PATH.name} to the app folder or upload a CSV.")
+        st.info("👋 No CSV available. Add the Summer event log CSV to the app folder or upload one.")
 
 if __name__ == "__main__":
     main()

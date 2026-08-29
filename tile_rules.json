@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "status": "pending",
+  "notes": "Completion requirements have not been supplied yet. The app must not infer completed tiles from submissions while this file is pending.",
+  "tiles": {
+    "start_toa": {"status": "pending", "completion": null},
+    "start_nex": {"status": "pending", "completion": null},
+    "start_hueycoatl": {"status": "pending", "completion": null},
+    "grid_gwd": {"status": "pending", "completion": null},
+    "grid_venator_shards": {"status": "pending", "completion": null},
+    "grid_vorkath": {"status": "pending", "completion": null},
+    "grid_dks": {"status": "pending", "completion": null},
+    "grid_revs": {"status": "pending", "completion": null},
+    "grid_tob": {"status": "pending", "completion": null},
+    "grid_colosseum": {"status": "pending", "completion": null},
+    "grid_zenytes": {"status": "pending", "completion": null},
+    "grid_royal_titans": {"status": "pending", "completion": null},
+    "grid_barrows": {"status": "pending", "completion": null},
+    "grid_cerberus": {"status": "pending", "completion": null},
+    "grid_the_mad_angel": {"status": "pending", "completion": null},
+    "path_voidwaker": {"status": "pending", "completion": null},
+    "path_pnm_nightmare": {"status": "pending", "completion": null},
+    "path_cox": {"status": "pending", "completion": null},
+    "final_corrupted_gauntlet": {
+      "status": "pending",
+      "available_from_start": true,
+      "starting_chests": 1,
+      "completion": null
+    },
+    "final_araxxor": {"status": "pending", "completion": null},
+    "final_dt2": {"status": "pending", "completion": null},
+    "final_tob": {"status": "pending", "completion": null},
+    "final_doom": {"status": "pending", "completion": null},
+    "final_inferno": {"status": "pending", "completion": null},
+    "final_yama": {"status": "pending", "completion": null},
+    "final_cox": {"status": "pending", "completion": null},
+    "final_moons_of_peril": {"status": "pending", "completion": null},
+    "final_zulrah": {"status": "pending", "completion": null},
+    "final_maggot_king": {"status": "pending", "completion": null},
+    "final_toa": {"status": "pending", "completion": null},
+    "bonus_corp_beast": {"status": "pending", "completion": null}
+  }
+}

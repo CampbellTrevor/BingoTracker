@@ -1,7 +1,6 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -13,35 +12,11 @@ sys.path.insert(0, str(PROJECT_DIR))
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 
-class FakeWomResponse:
-    status_code = 200
-    headers = {}
-
-    @staticmethod
-    def raise_for_status():
-        return None
-
-    @staticmethod
-    def json():
-        return []
-
-
 class StreamlitAppTests(unittest.TestCase):
-    def setUp(self):
-        self.requests_get_patch = patch("requests.get", return_value=FakeWomResponse())
-        self.requests_get_patch.start()
-
-    def tearDown(self):
-        self.requests_get_patch.stop()
-
     def test_default_data_renders_board_without_exception(self):
         app = AppTest.from_file(str(PROJECT_DIR / "bingostats.py"), default_timeout=30).run()
 
         self.assertEqual(len(app.exception), 0)
-        self.assertEqual(app.tabs[1].label, "Tile Planner")
-        self.assertTrue(
-            any(subheader.value == "FIDDLSTCKS Grid Tile Planner" for subheader in app.subheader)
-        )
         self.assertEqual(app.tabs[0].label, "🗺️ Board Progress")
         board_markup = next(markdown.value for markdown in app.markdown if 'data-tile-id="start_toa"' in markdown.value)
         self.assertEqual(board_markup.count('data-tile-id="'), 31)

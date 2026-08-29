@@ -3,7 +3,6 @@ import pandas as pd
 import plotly.express as px
 from pathlib import Path
 import time
-import math
 import re
 import json
 import requests
@@ -13,15 +12,6 @@ from board_progress import (
     calculate_team_progress,
     load_tile_rules,
     render_board_html,
-)
-from tile_assignment import (
-    GRID_TILE_SPECS,
-    build_balanced_assignments,
-    parse_bulk_hiscores,
-    rankings_by_tile,
-    roster_coverage_rows,
-    score_grid_tiles,
-    tile_mapping_rows,
 )
 
 # --- Page Configuration ---
@@ -35,10 +25,6 @@ WOM_API_BASE_URL = "https://api.wiseoldman.net/v2"
 WOM_GROUP_ID = 11794
 WOM_MAX_RETRIES = 5
 WOM_BASE_BACKOFF_SECONDS = 1.5
-WOM_BULK_CACHE_SECONDS = 21600
-WOM_ERROR_CACHE_SECONDS = 60
-WOM_MANUAL_REFRESH_COOLDOWN_SECONDS = 60
-WOM_USER_AGENT = "BapHeads-Bingo-Tracker/1.0 (https://bapheads-bingo.streamlit.app/)"
 WOM_PLAYER_ALIASES = {
     # CSV player name: Wise Old Man player name
     "Iron Thrage": "Thrayge",
@@ -54,9 +40,8 @@ SUPPORTED_WOM_BOSS_METRICS = {
     "doom_of_mokhaiotl", "duke_sucellus", "general_graardor", "giant_mole",
     "grotesque_guardians", "hespori", "kalphite_queen", "king_black_dragon",
     "kraken", "kreearra", "kril_tsutsaroth", "lunar_chests", "mimic",
-    "mad_angel", "maggot_king", "nex", "nightmare", "obor", "phantom_muspah",
-    "phosanis_nightmare",
-    "scorpia", "skotizo", "sol_heredit", "spindel", "tempoross", "the_corrupted_gauntlet", "the_hueycoatl",
+    "nex", "nightmare", "obor", "phosanis_nightmare", "royal_titans",
+    "scorpia", "skotizo", "sol_heredit", "spindel", "tempoross", "the_hueycoatl",
     "the_leviathan", "the_royal_titans", "the_whisperer", "theatre_of_blood",
     "theatre_of_blood_hard_mode", "thermonuclear_smoke_devil", "tombs_of_amascut",
     "tombs_of_amascut_expert", "tzkal_zuk", "tztok_jad", "vardorvis",
@@ -369,239 +354,6 @@ def load_wom_group_metrics_from_file(cache_path, group_id, start_date_str, end_d
     return kc_by_metric, notes
 
 
-@st.cache_data(ttl=WOM_BULK_CACHE_SECONDS, show_spinner=False)
-def _fetch_wom_group_bulk_hiscores_success(group_id):
-    """Fetch every tracked group member in the single bulk request WOM recommends."""
-
-    url = f"{WOM_API_BASE_URL}/groups/{group_id}/bulk-hiscores"
-    response = requests.get(
-        url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": WOM_USER_AGENT,
-        },
-        timeout=20,
-    )
-    if response.status_code == 429:
-        retry_after = response.headers.get("Retry-After")
-        retry_note = f" Try again in {retry_after} seconds." if retry_after else ""
-        raise RuntimeError(f"Wise Old Man rate limit reached.{retry_note}")
-    if response.status_code == 404:
-        raise RuntimeError(f"Wise Old Man group {group_id} was not found.")
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, list):
-        raise RuntimeError("Wise Old Man returned an unexpected bulk-hiscores response.")
-    return payload
-
-
-@st.cache_data(ttl=WOM_ERROR_CACHE_SECONDS, show_spinner=False)
-def fetch_wom_group_bulk_hiscores(group_id):
-    """Cache short-lived failures so ordinary Streamlit reruns do not hammer WOM."""
-
-    try:
-        return _fetch_wom_group_bulk_hiscores_success(group_id), None
-    except (requests.RequestException, RuntimeError, ValueError) as exc:
-        return None, str(exc)
-
-
-def _render_tile_planner():
-    st.subheader("FIDDLSTCKS Grid Tile Planner")
-    st.caption(
-        "Ranks the captain and all 19 draft picks using their latest available lifetime Wise Old Man snapshot. "
-        "Readiness is a transparent 0–100 planning index, not a drop probability. Only the two "
-        "12-tile grids are included; the opening and hallway tiles are intentionally excluded."
-    )
-    st.info(
-        "This is provisional until the exact drop requirements arrive. Boss KC is the main signal; "
-        "relevant skills and EHB provide context. Revenants and Zenytes use clearly marked proxies "
-        "because WoM does not track their target KC."
-    )
-
-    refresh_col, source_col = st.columns([1, 4])
-    with refresh_col:
-        if st.button("Refresh WoM stats", key="refresh_wom_planner"):
-            refresh_now = time.time()
-            last_refresh = st.session_state.get("wom_planner_last_manual_refresh", 0.0)
-            cooldown_remaining = WOM_MANUAL_REFRESH_COOLDOWN_SECONDS - (refresh_now - last_refresh)
-            if cooldown_remaining > 0:
-                st.warning(f"Refresh is available again in {math.ceil(cooldown_remaining)} seconds.")
-            else:
-                fetch_wom_group_bulk_hiscores.clear()
-                _fetch_wom_group_bulk_hiscores_success.clear()
-                st.session_state["wom_planner_last_manual_refresh"] = refresh_now
-                st.rerun()
-    with source_col:
-        st.caption(
-            f"Live source: BapHeads Wise Old Man group {WOM_GROUP_ID}. "
-            "A successful bulk response is cached for six hours."
-        )
-
-    try:
-        with st.spinner("Loading the BapHeads WoM snapshot..."):
-            bulk_payload, bulk_error = fetch_wom_group_bulk_hiscores(WOM_GROUP_ID)
-        if bulk_error:
-            raise RuntimeError(bulk_error)
-        planner_players = parse_bulk_hiscores(bulk_payload)
-        readiness_records = score_grid_tiles(planner_players)
-        tile_rankings = rankings_by_tile(readiness_records)
-        assignments, workload = build_balanced_assignments(readiness_records)
-    except (requests.RequestException, RuntimeError, ValueError) as exc:
-        st.error(f"The live Wise Old Man snapshot could not be loaded: {exc}")
-        st.warning(
-            "No players were silently scored as zero. The tile-to-metric model remains visible "
-            "below, and the Refresh button will retry the single bulk request."
-        )
-        with st.expander("Tile-to-WoM metric model", expanded=True):
-            st.dataframe(pd.DataFrame(tile_mapping_rows()), hide_index=True, width="stretch")
-        return
-
-    matched_count = sum(player.available for player in planner_players)
-    updated_values = [
-        pd.to_datetime(player.updated_at, utc=True, errors="coerce")
-        for player in planner_players
-        if player.available and player.updated_at
-    ]
-    updated_values = [value for value in updated_values if not pd.isna(value)]
-    latest_update = max(updated_values).strftime("%Y-%m-%d %H:%M UTC") if updated_values else "Unknown"
-    oldest_update = min(updated_values).strftime("%Y-%m-%d %H:%M UTC") if updated_values else "Unknown"
-    snapshot_now = pd.Timestamp.now(tz="UTC")
-    stale_snapshot_count = sum(
-        (snapshot_now - value).total_seconds() > 30 * 86400 for value in updated_values
-    )
-    unmatched = [player.draft_name for player in planner_players if not player.available]
-
-    pm1, pm2, pm3, pm4 = st.columns(4)
-    pm1.metric("Roster Coverage", f"{matched_count}/{len(planner_players)}")
-    pm2.metric("Grid Slots", len(GRID_TILE_SPECS))
-    pm3.metric("Primary Assignments", len(assignments))
-    pm4.metric("Oldest Snapshot", oldest_update)
-    st.caption(f"Most recent teammate snapshot: {latest_update}.")
-
-    if stale_snapshot_count:
-        st.warning(
-            f"{stale_snapshot_count} matched roster snapshot(s) are more than 30 days old; "
-            "their evidence confidence is automatically reduced."
-        )
-
-    if unmatched:
-        st.warning(
-            "Unscored roster names (excluded from assignments): " + ", ".join(unmatched)
-        )
-    else:
-        st.success("All 20 FIDDLSTCKS roster members matched a current WoM group profile.")
-
-    assignment_df = pd.DataFrame(assignments)
-    if not assignment_df.empty:
-        st.markdown("#### Recommended primary assignments")
-        st.caption(
-            "The assignment pass handles the scarcest tiles first and balances score, evidence "
-            "quality, repeated specialties, and workload. Primary means tile lead; raid rows also "
-            "show that lead plus the top two other readiness ranks."
-        )
-        assignment_columns = [
-            "Section",
-            "Tile",
-            "Primary",
-            "Readiness",
-            "Band",
-            "Confidence",
-            "Backup",
-            "Backup Score",
-            "Backup Confidence",
-            "Recommended Squad",
-            "Raw WOM Evidence",
-            "Why",
-        ]
-        st.dataframe(
-            assignment_df[assignment_columns],
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "Readiness": st.column_config.NumberColumn(format="%.1f"),
-                "Backup Score": st.column_config.NumberColumn(format="%.1f"),
-            },
-        )
-        st.download_button(
-            "Download assignment plan (CSV)",
-            assignment_df[assignment_columns].to_csv(index=False).encode("utf-8"),
-            file_name="fiddlstcks_grid_assignments.csv",
-            mime="text/csv",
-            key="download_tile_assignments",
-        )
-
-    st.markdown("#### Player workload")
-    st.caption(
-        "A player can lead more than one tile when their specialist advantage is useful. "
-        "Unassigned players remain available as backups and in every tile ranking."
-    )
-    st.dataframe(
-        pd.DataFrame(workload),
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "Average Readiness": st.column_config.NumberColumn(format="%.1f"),
-            "Burden": st.column_config.NumberColumn(format="%.2f"),
-        },
-    )
-
-    st.markdown("#### Rank every teammate for a tile")
-    tile_labels = {
-        tile.tile_id: f"{tile.section} — {tile.label}"
-        + (" (OPEN FROM START)" if tile.tile_id == "final_corrupted_gauntlet" else "")
-        for tile in GRID_TILE_SPECS
-    }
-    selected_tile_id = st.selectbox(
-        "Choose a grid tile",
-        [tile.tile_id for tile in GRID_TILE_SPECS],
-        format_func=lambda tile_id: tile_labels[tile_id],
-        key="planner_tile",
-    )
-    selected_rows = tile_rankings.get(selected_tile_id, [])
-    ranking_table = []
-    for rank, row in enumerate(selected_rows, start=1):
-        ranking_table.append(
-            {
-                "Rank": rank if row.score is not None else "—",
-                "Player": row.player,
-                "Readiness": row.score,
-                "Band": row.band,
-                "Confidence": row.confidence,
-                "Raw WOM Evidence": row.evidence,
-                "Score Components": row.component_details,
-            }
-        )
-    st.dataframe(
-        pd.DataFrame(ranking_table),
-        hide_index=True,
-        width="stretch",
-        column_config={"Readiness": st.column_config.NumberColumn(format="%.1f")},
-    )
-
-    with st.expander("Full 20-player roster and WoM match audit"):
-        st.caption(
-            "Draft labels stay visible even when a current WoM account name differs. "
-            "FIDDLSTCKS maps to Fiddlestcks, and LORNA SNOIRE maps to Lorna Snore."
-        )
-        st.dataframe(
-            pd.DataFrame(roster_coverage_rows(planner_players)),
-            hide_index=True,
-            width="stretch",
-        )
-
-    with st.expander("How every tile maps to WoM metrics"):
-        st.caption(
-            "Lifetime KC is log-scaled against a tile benchmark and blended with the player's "
-            "rank inside this 20-person roster. Missing fields keep their weight at zero; they are "
-            "never redistributed into other components."
-        )
-        st.dataframe(
-            pd.DataFrame(tile_mapping_rows()),
-            hide_index=True,
-            width="stretch",
-        )
-
-
 # --- 2. App Interface ---
 def main():
     st.markdown("### Summer Bingo 2026 Dashboard")
@@ -704,7 +456,7 @@ def main():
             board_rules = load_tile_rules(TILE_RULES_FILE)
 
             # --- TABS ---
-            dashboard_tab_labels = [
+            tab_board, tab_leader, tab_player_leaderboard, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_highest_kc, tab_raw = st.tabs([
                 "🗺️ Board Progress",
                 "🏆 Leaderboards",
                 "📋 Player Leaderboard",
@@ -714,10 +466,7 @@ def main():
                 "👥 Team Rankings",
                 "⚔️ Highest KC",
                 "💾 Cleaned Data"
-            ]
-            tab_board, tab_tile_planner, tab_leader, tab_player_leaderboard, tab_items, tab_player, tab_rankings, tab_team_rankings, tab_highest_kc, tab_raw = st.tabs(
-                dashboard_tab_labels[:1] + ["Tile Planner"] + dashboard_tab_labels[1:]
-            )
+            ])
 
             # PROVISIONAL BOARD PROGRESS
             with tab_board:
@@ -806,10 +555,6 @@ def main():
                         )
                 else:
                     st.info("No teams are available in the current CSV.")
-
-            # FIDDLSTCKS TILE PLANNER
-            with tab_tile_planner:
-                _render_tile_planner()
 
             # LEADERBOARDS
             with tab_leader:

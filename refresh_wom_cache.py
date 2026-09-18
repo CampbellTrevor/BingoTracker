@@ -7,9 +7,11 @@ import ast
 import csv
 import json
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.error import HTTPError
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -65,6 +67,23 @@ def _normalize_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
 
 
+def _event_player_lookups(csv_path: Path, app_file: Path) -> dict[str, str]:
+    aliases = _literal_assignment(app_file, "WOM_PLAYER_ALIASES")
+    aliases_by_key = {
+        _normalize_name(source): str(target).strip()
+        for source, target in aliases.items()
+    }
+    players: dict[str, str] = {}
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            raw_name = str(row.get("Player Name") or "").strip()
+            if not raw_name:
+                continue
+            query_name = aliases_by_key.get(_normalize_name(raw_name), raw_name)
+            players[_normalize_name(query_name)] = query_name
+    return players
+
+
 def _requested_metrics(app_file: Path) -> set[str]:
     supported = set(_literal_assignment(app_file, "SUPPORTED_WOM_BOSS_METRICS"))
     category_map = _literal_assignment(app_file, "CATEGORY_TO_WOM_BOSSES")
@@ -82,6 +101,53 @@ def _fetch_bulk_gains(group_id: int, start_date: str, end_date: str):
     request = Request(url, headers={"User-Agent": "Bapheads-BingoStats/1.0"})
     with urlopen(request, timeout=120) as response:
         return json.load(response)
+
+
+def _fetch_player_gains(username: str, start_date: str, end_date: str):
+    query = urlencode({"startDate": start_date, "endDate": end_date})
+    encoded_username = quote(username, safe="")
+    url = f"{WOM_API_BASE_URL}/players/{encoded_username}/gained?{query}"
+    request = Request(url, headers={"User-Agent": "Bapheads-BingoStats/1.0"})
+    with urlopen(request, timeout=60) as response:
+        return json.load(response)
+
+
+def _bulk_player_keys(rows) -> set[str]:
+    keys: set[str] = set()
+    for row in rows:
+        player = row.get("player") if isinstance(row, dict) else None
+        if not isinstance(player, dict):
+            continue
+        player_name = (
+            player.get("username")
+            or player.get("displayName")
+            or player.get("name")
+        )
+        if player_name:
+            keys.add(_normalize_name(player_name))
+    return keys
+
+
+def merge_player_gains(
+    cache_payload: dict,
+    player_key: str,
+    player_gains: dict,
+    requested_metrics: set[str],
+) -> None:
+    data = player_gains.get("data", {}) if isinstance(player_gains, dict) else {}
+    bosses = data.get("bosses", {}) if isinstance(data, dict) else {}
+    if not isinstance(bosses, dict):
+        raise ValueError(f"Unexpected player-gains response for {player_key}")
+
+    for metric_name in requested_metrics:
+        metric_row = bosses.get(metric_name, {})
+        kills = metric_row.get("kills", {}) if isinstance(metric_row, dict) else {}
+        gained = kills.get("gained", 0) if isinstance(kills, dict) else 0
+        numeric_gain = float(gained or 0)
+        if numeric_gain.is_integer():
+            numeric_gain = int(numeric_gain)
+        if numeric_gain:
+            cache_payload["metrics"][metric_name][player_key] = numeric_gain
 
 
 def build_cache_payload(
@@ -171,6 +237,32 @@ def main() -> None:
         end_date,
         requested_metrics,
     )
+
+    # The group endpoint is authoritative for current members. A participant
+    # can leave the group after submitting, so make one player-level request
+    # only for each event name absent from the bulk response.
+    bulk_player_keys = _bulk_player_keys(rows)
+    event_players = _event_player_lookups(args.csv, args.app_file)
+    supplemented_players: list[str] = []
+    unavailable_players: list[str] = []
+    for player_key, query_name in sorted(event_players.items()):
+        if player_key in bulk_player_keys:
+            continue
+        try:
+            player_gains = _fetch_player_gains(query_name, start_date, end_date)
+        except HTTPError as exc:
+            if exc.code == 404:
+                unavailable_players.append(query_name)
+                continue
+            raise
+        merge_player_gains(
+            payload,
+            player_key,
+            player_gains,
+            requested_metrics,
+        )
+        supplemented_players.append(query_name)
+
     args.output.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -179,6 +271,13 @@ def main() -> None:
         f"Wrote {len(payload['metrics'])} metrics for {len(rows)} group members "
         f"to {args.output} ({start_date}..{end_date})."
     )
+    if supplemented_players:
+        print("Supplemented former/non-group players: " + ", ".join(supplemented_players))
+    if unavailable_players:
+        print(
+            "No Wise Old Man profile found: " + ", ".join(unavailable_players),
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,14 @@ from typing import Any
 
 import pandas as pd
 
+from tile_completion_rules import (
+    TILE_RULES,
+    apply_submission,
+    create_empty_state,
+    evaluate_completion,
+    format_route_progress,
+)
+
 
 @dataclass(frozen=True)
 class BoardTile:
@@ -87,7 +95,7 @@ CANONICAL_ALIASES = {
     "doom": ("Doom", "Doom of Mokhaiotl"),
     "inferno": ("Inferno",),
     "yama": ("Yama",),
-    "moons_of_peril": (
+    "tormented_demons": (
         "Tormented Demon",
         "Tormented Demons",
         # Retained for compatibility with the earlier draft/example export.
@@ -165,7 +173,7 @@ BOARD_TILES = (
     _tile("final_inferno", "INFERNO", "inferno", "final_grid", 78.974, 46.628, 6.540),
     _tile("final_yama", "YAMA", "yama", "final_grid", 85.844, 46.628, 6.540),
     _tile("final_cox", "COX", "cox", "final_grid", 92.632, 46.628, 6.540),
-    _tile("final_moons_of_peril", "TORMENTED DEMONS", "moons_of_peril", "final_grid", 72.103, 59.091, 6.540),
+    _tile("final_tormented_demons", "TORMENTED DEMONS", "tormented_demons", "final_grid", 72.103, 59.091, 6.540),
     _tile("final_zulrah", "ZULRAH", "zulrah", "final_grid", 78.974, 59.091, 6.540),
     _tile("final_maggot_king", "MAGGOT KING", "maggot_king", "final_grid", 85.844, 59.091, 6.540),
     _tile("final_toa", "TOA", "toa", "final_grid", 92.632, 59.091, 6.540),
@@ -191,12 +199,24 @@ def _build_alias_lookup() -> dict[str, str]:
 
 
 ALIAS_LOOKUP = _build_alias_lookup()
+
+# The Summer form's long TOA/COX names identify physical board slots. Short
+# TOA/COX aliases remain generic so older exports can still fill both matching
+# slots sequentially according to the board gates.
+SLOT_SPECIFIC_ALIAS_TARGETS = {
+    normalize_tile_name("Tombs of Amascut"): "start_toa",
+    normalize_tile_name("Tombs of Amascut 2"): "final_toa",
+    normalize_tile_name("Chambers of Xeric"): "path_cox",
+    normalize_tile_name("Chambers of Xeric 2"): "final_cox",
+}
+
+
 def match_tile_key(value: Any) -> str | None:
     return ALIAS_LOOKUP.get(normalize_tile_name(value))
 
 
 def load_tile_rules(rules_path: Path) -> dict[str, dict[str, Any]]:
-    """Load the per-slot provisional/future completion-rule metadata."""
+    """Load the per-slot completion-rule metadata used by the rules table."""
 
     try:
         payload = json.loads(rules_path.read_text(encoding="utf-8"))
@@ -243,13 +263,33 @@ ORDERED_PATH_TILE_IDS = ("path_voidwaker", "path_pnm_nightmare", "path_cox")
 FINAL_GRID_TILE_IDS = tuple(tile.tile_id for tile in BOARD_TILES if tile.stage == "final_grid")
 CG_TILE_ID = "final_corrupted_gauntlet"
 BONUS_TILE_ID = "bonus_corp_beast"
+RACE_TILE_IDS = tuple(tile.tile_id for tile in BOARD_TILES if tile.tile_id != BONUS_TILE_ID)
+COMPLETION_RULE_ID_BY_TILE_ID = {
+    "start_toa": "opening_hallway_toa",
+    "start_nex": "opening_hallway_nex",
+    "start_hueycoatl": "opening_hallway_hueycoatl",
+    "path_voidwaker": "middle_hallway_voidwaker",
+    "path_pnm_nightmare": "middle_hallway_nightmare",
+    "path_cox": "middle_hallway_cox",
+    **{
+        tile.tile_id: tile.tile_id
+        for tile in BOARD_TILES
+        if tile.tile_id in TILE_RULES
+    },
+}
+if set(COMPLETION_RULE_ID_BY_TILE_ID) != {tile.tile_id for tile in BOARD_TILES}:
+    raise RuntimeError("Every board slot must have exactly one completion rule")
 
 
 def _all_complete(completed_tile_ids: set[str], required_tile_ids: tuple[str, ...]) -> bool:
     return set(required_tile_ids).issubset(completed_tile_ids)
 
 
-def _eligible_tile_ids(completed_tile_ids: set[str]) -> set[str]:
+def _eligible_tile_ids(
+    completed_tile_ids: set[str],
+    *,
+    cg_starting_chest_used: bool = False,
+) -> set[str]:
     """Return the slots eligible immediately after the current completions."""
 
     eligible: set[str] = set()
@@ -275,8 +315,14 @@ def _eligible_tile_ids(completed_tile_ids: set[str]) -> set[str]:
     elif BONUS_TILE_ID not in completed_tile_ids:
         eligible.add(BONUS_TILE_ID)
 
-    # The starting CG chest is the only exception to the normal gates.
-    if CG_TILE_ID not in completed_tile_ids:
+    # Exactly one prepared CG chest may contribute before the Final grid. If it
+    # does not finish the tile, further CG rows wait for the normal grid gate.
+    final_grid_unlocked = _all_complete(completed_tile_ids, ORDERED_PATH_TILE_IDS)
+    if (
+        CG_TILE_ID not in completed_tile_ids
+        and not final_grid_unlocked
+        and not cg_starting_chest_used
+    ):
         eligible.add(CG_TILE_ID)
     return eligible
 
@@ -294,6 +340,11 @@ def _locked_reason(tile_id: str) -> str:
         return "PNM/NIGHTMARE was locked because VOIDWAKER was not finished yet."
     if tile_id == "path_cox":
         return "COX was locked because PNM/NIGHTMARE was not finished yet."
+    if tile_id == CG_TILE_ID:
+        return (
+            "The one prepared starting CG chest was already used; further CG drops wait "
+            "until the Final grid unlocks."
+        )
     if tile_id in FINAL_GRID_TILE_IDS:
         return "The final grid was locked until VOIDWAKER, PNM/NIGHTMARE, and COX were finished in order."
     if tile_id == BONUS_TILE_ID:
@@ -317,7 +368,10 @@ def _gate_text(tile_id: str) -> str:
     if tile_id == "path_cox":
         return "Unlocks after PNM/NIGHTMARE is finished."
     if tile_id == CG_TILE_ID:
-        return "Available from event start using the team's one starting CG chest."
+        return (
+            "One prepared team chest may contribute at event start; if that does not finish "
+            "the tile, further CG submissions unlock with the Final grid."
+        )
     if tile_id in FINAL_GRID_TILE_IDS:
         return "Unlocks after the second hallway ends with COX."
     if tile_id == BONUS_TILE_ID:
@@ -334,9 +388,11 @@ def _current_section(completed_tile_ids: set[str]) -> tuple[str, int, int]:
         return "Second hallway", len(completed_tile_ids.intersection(ORDERED_PATH_TILE_IDS)), len(ORDERED_PATH_TILE_IDS)
     if not _all_complete(completed_tile_ids, FINAL_GRID_TILE_IDS):
         return "Final grid", len(completed_tile_ids.intersection(FINAL_GRID_TILE_IDS)), len(FINAL_GRID_TILE_IDS)
-    if BONUS_TILE_ID not in completed_tile_ids:
-        return "Bonus tile", 0, 1
-    return "Board complete", 1, 1
+    return (
+        "Race complete",
+        len(completed_tile_ids.intersection(RACE_TILE_IDS)),
+        len(RACE_TILE_IDS),
+    )
 
 
 def _next_objective(
@@ -349,12 +405,16 @@ def _next_objective(
         for tile in BOARD_TILES
         if tile.tile_id in eligible_tile_ids and tile.tile_id != CG_TILE_ID
     ]
-    if section in {"First grid", "Final grid"} and main_eligible:
+    if section == "Race complete":
+        objective = (
+            "Everything is finished"
+            if BONUS_TILE_ID in completed_tile_ids
+            else "The 30-tile race is complete; the Corp Beast bonus is available"
+        )
+    elif section in {"First grid", "Final grid"} and main_eligible:
         objective = f"Any of {len(main_eligible)} unlocked {section.lower()} tiles"
     elif main_eligible:
         objective = " → ".join(TILES_BY_ID[tile_id].label for tile_id in main_eligible)
-    elif section == "Board complete":
-        objective = "Everything is finished"
     else:
         objective = section
 
@@ -363,16 +423,40 @@ def _next_objective(
     return objective
 
 
+def _blocked_route_ids(
+    tile_id: str,
+    credited_item_keys: dict[str, list[str]],
+) -> set[str]:
+    """Apply the planner's cross-stage mega-rare reuse restrictions."""
+
+    if tile_id == "final_tob" and "scythe_of_vitur" in credited_item_keys["grid_tob"]:
+        return {"scythe"}
+    if tile_id == "final_cox" and "twisted_bow" in credited_item_keys["path_cox"]:
+        return {"twisted_bow"}
+    if tile_id == "final_toa" and "tumekens_shadow" in credited_item_keys["start_toa"]:
+        return {"shadow"}
+    return set()
+
+
 def calculate_team_progress(df: pd.DataFrame, team: str) -> dict[str, Any]:
-    """Apply the provisional first-eligible-submission completion rule."""
+    """Replay one team's log through the board gates and completion formulas."""
 
     completed_events: dict[str, dict[str, Any]] = {}
     completion_sequence: dict[str, int] = {}
+    rule_states = {
+        tile.tile_id: create_empty_state(COMPLETION_RULE_ID_BY_TILE_ID[tile.tile_id])
+        for tile in BOARD_TILES
+    }
+    credited_submissions: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    credited_item_keys: dict[str, list[str]] = defaultdict(list)
+    nonqualifying_submissions: dict[str, list[dict[str, Any]]] = defaultdict(list)
     extra_submissions: dict[str, list[dict[str, Any]]] = defaultdict(list)
     locked_attempts: dict[str, list[dict[str, Any]]] = defaultdict(list)
     ignored_locked: list[dict[str, Any]] = []
+    nonqualifying: list[dict[str, Any]] = []
     unmatched: list[dict[str, Any]] = []
     accepted: list[dict[str, Any]] = []
+    cg_starting_chest_used = False
 
     for sequence, (_, row) in enumerate(_sorted_team_rows(df, team).iterrows(), start=1):
         submission = row.to_dict()
@@ -387,9 +471,19 @@ def calculate_team_progress(df: pd.DataFrame, team: str) -> dict[str, Any]:
             unmatched.append(diagnostic)
             continue
 
-        candidate_tile_ids = TILE_IDS_BY_KEY[canonical_key]
+        specific_tile_id = SLOT_SPECIFIC_ALIAS_TARGETS.get(
+            normalize_tile_name(row.get("Category"))
+        )
+        candidate_tile_ids = (
+            (specific_tile_id,)
+            if specific_tile_id is not None
+            else TILE_IDS_BY_KEY[canonical_key]
+        )
         completed_tile_ids = set(completed_events)
-        eligible_tile_ids = _eligible_tile_ids(completed_tile_ids)
+        eligible_tile_ids = _eligible_tile_ids(
+            completed_tile_ids,
+            cg_starting_chest_used=cg_starting_chest_used,
+        )
         acceptable_tile_ids = [
             tile_id
             for tile_id in candidate_tile_ids
@@ -404,24 +498,67 @@ def calculate_team_progress(df: pd.DataFrame, team: str) -> dict[str, Any]:
 
         if acceptable_tile_ids:
             tile_id = acceptable_tile_ids[0]
-            completed_events[tile_id] = submission
-            completion_sequence[tile_id] = sequence
-            accepted.append(
-                {
+            final_grid_unlocked = _all_complete(completed_tile_ids, ORDERED_PATH_TILE_IDS)
+            if tile_id == CG_TILE_ID and not final_grid_unlocked:
+                cg_starting_chest_used = True
+
+            blocked_routes = _blocked_route_ids(tile_id, credited_item_keys)
+            outcome = apply_submission(
+                rule_states[tile_id],
+                row.get("Item"),
+                row.get("Player"),
+                blocked_routes,
+            )
+            if not outcome.accepted:
+                reason_by_code = {
+                    "known nonqualifying item": "This item is explicitly excluded by the tile rule.",
+                    "unknown item alias": "This item name is not recognized by the tile rule.",
+                    "item does not advance this tile": "This item does not advance this physical tile's rule.",
+                    "item only advances blocked route": "This item belongs only to a route that was permanently blocked by an earlier tile.",
+                    "player name is required": "This completion route requires a named player.",
+                    "player already counted": "This player has already received credit for this distinct-player route.",
+                }
+                diagnostic = {
                     **submission,
                     "Board Slot": tile_id,
-                    "Disposition": "Completed tile",
-                    "Reason": "First eligible submission for this tile.",
+                    "Disposition": "No rule progress",
+                    "Reason": reason_by_code.get(outcome.reason, outcome.reason),
                 }
+                nonqualifying_submissions[tile_id].append(diagnostic)
+                nonqualifying.append(diagnostic)
+                continue
+
+            credited_submissions[tile_id].append(submission)
+            if outcome.item_key is not None:
+                credited_item_keys[tile_id].append(outcome.item_key)
+            evaluation = evaluate_completion(rule_states[tile_id], blocked_routes)
+            completed_route = next(
+                (route.label for route in evaluation.routes if route.complete),
+                None,
             )
+            did_complete = evaluation.complete
+            diagnostic = {
+                **submission,
+                "Board Slot": tile_id,
+                "Disposition": "Completed tile" if did_complete else "Advanced tile progress",
+                "Reason": (
+                    f"Completion route met: {completed_route}."
+                    if did_complete
+                    else "Qualifying submission recorded toward the tile requirements."
+                ),
+            }
+            accepted.append(diagnostic)
+            if did_complete:
+                completed_events[tile_id] = submission
+                completion_sequence[tile_id] = sequence
             continue
 
         incomplete_tile_ids = [
             tile_id for tile_id in candidate_tile_ids if tile_id not in completed_events
         ]
         if incomplete_tile_ids:
-            # For repeated TOA/TOB/COX labels, attach the rejected attempt to the
-            # next unfinished physical slot. It is never banked for later.
+            # Rejected attempts are attached to the next unfinished physical
+            # slot and are never banked for a later unlock.
             tile_id = incomplete_tile_ids[0]
             reason = _locked_reason(tile_id)
             diagnostic = {
@@ -440,15 +577,17 @@ def calculate_team_progress(df: pd.DataFrame, team: str) -> dict[str, Any]:
         extra_submissions[tile_id].append(submission)
 
     completed_tile_ids = set(completed_events)
-    eligible_tile_ids = _eligible_tile_ids(completed_tile_ids)
+    eligible_tile_ids = _eligible_tile_ids(
+        completed_tile_ids,
+        cg_starting_chest_used=cg_starting_chest_used,
+    )
     section, section_completed, section_total = _current_section(completed_tile_ids)
     section_rank = {
         "Opening hallway": 0,
         "First grid": 1,
         "Second hallway": 2,
         "Final grid": 3,
-        "Bonus tile": 4,
-        "Board complete": 5,
+        "Race complete": 4,
     }[section]
     states: dict[str, dict[str, Any]] = {}
     for tile in BOARD_TILES:
@@ -458,24 +597,43 @@ def calculate_team_progress(df: pd.DataFrame, team: str) -> dict[str, Any]:
             status = "available"
         else:
             status = "locked"
+        blocked_routes = _blocked_route_ids(tile.tile_id, credited_item_keys)
+        rule = TILE_RULES[COMPLETION_RULE_ID_BY_TILE_ID[tile.tile_id]]
+        rule_summary = (
+            rule.routes[0].label
+            if len(rule.routes) == 1
+            else "Complete any one route: " + " / ".join(route.label for route in rule.routes)
+        )
         states[tile.tile_id] = {
             "status": status,
             "completion": completed_events.get(tile.tile_id),
+            "submissions": credited_submissions.get(tile.tile_id, []),
+            "credited_item_keys": credited_item_keys.get(tile.tile_id, []),
+            "nonqualifying": nonqualifying_submissions.get(tile.tile_id, []),
             "extras": extra_submissions.get(tile.tile_id, []),
             "locked_attempts": locked_attempts.get(tile.tile_id, []),
+            "rule_summary": rule_summary,
+            "rule_progress": format_route_progress(rule_states[tile.tile_id], blocked_routes),
+            "rule_notes": rule.notes,
         }
 
     extra_count = sum(len(rows) for rows in extra_submissions.values())
+    race_completed_count = len(completed_tile_ids.intersection(RACE_TILE_IDS))
     return {
         "team": team,
         "states": states,
         "accepted": accepted,
         "ignored_locked": ignored_locked,
+        "nonqualifying": nonqualifying,
         "unmatched": unmatched,
         "completed_count": len(completed_events),
+        "race_completed_count": race_completed_count,
+        "race_total": len(RACE_TILE_IDS),
+        "bonus_complete": BONUS_TILE_ID in completed_events,
         "available_count": len(eligible_tile_ids),
         "locked_count": len(BOARD_TILES) - len(completed_events) - len(eligible_tile_ids),
         "ignored_locked_count": len(ignored_locked),
+        "nonqualifying_count": len(nonqualifying),
         "unmatched_count": len(unmatched),
         "extra_submission_count": extra_count,
         "current_section": section,
@@ -484,6 +642,7 @@ def calculate_team_progress(df: pd.DataFrame, team: str) -> dict[str, Any]:
         "section_total": section_total,
         "next_objective": _next_objective(completed_tile_ids, eligible_tile_ids, section),
         "cg_complete": CG_TILE_ID in completed_events,
+        "cg_starting_chest_used": cg_starting_chest_used,
     }
 
 
@@ -491,11 +650,9 @@ def board_readiness_rows(rules: dict[str, dict[str, Any]]) -> list[dict[str, str
     rows: list[dict[str, str]] = []
     for tile in BOARD_TILES:
         rule = rules.get(tile.tile_id, {})
-        status = str(rule.get("status", "pending")).strip().title() or "Pending"
+        status = str(rule.get("status", "Pending")).strip() or "Pending"
         aliases = ", ".join(CANONICAL_ALIASES[tile.canonical_key])
-        unlock = STAGE_DETAILS[tile.stage]["unlock"]
-        if tile.always_available:
-            unlock = "Available from event start (one starting CG chest)"
+        unlock = _gate_text(tile.tile_id)
         rows.append(
             {
                 "Slot ID": tile.tile_id,
@@ -556,7 +713,7 @@ def render_board_html(
     progress: dict[str, Any],
     team: str,
 ) -> str:
-    """Render provisional complete/available/locked states and hover details."""
+    """Render rule-based complete/available/locked states and hover details."""
 
     image_uri = _image_data_uri(image_path)
     hotspots: list[str] = []
@@ -564,18 +721,23 @@ def render_board_html(
     for tile in BOARD_TILES:
         tile_state = progress["states"][tile.tile_id]
         status = tile_state["status"]
-        completion = tile_state["completion"]
+        submissions = tile_state["submissions"]
+        nonqualifying = tile_state["nonqualifying"]
         extras = tile_state["extras"]
         ignored = tile_state["locked_attempts"]
-        completion_count = 1 if completion is not None else 0
+        submission_count = len(submissions)
+        nonqualifying_count = len(nonqualifying)
         extra_count = len(extras)
         ignored_count = len(ignored)
+        rule_summary = tile_state["rule_summary"]
+        rule_progress = tile_state["rule_progress"]
+        rule_notes = tile_state["rule_notes"]
 
         if status == "complete":
-            state_label = "Provisional complete"
+            state_label = "Complete"
             badge_label = "DONE"
         elif status == "available":
-            state_label = "Available now"
+            state_label = "In progress" if submission_count else "Available now"
             badge_label = "NOW"
         else:
             state_label = "Locked"
@@ -585,8 +747,9 @@ def render_board_html(
 
         stage = STAGE_DETAILS[tile.stage]
         aria_label = _escape(
-            f"{tile.label}. {state_label}. {completion_count} completing submission; "
-            f"{extra_count} additional; {ignored_count} ignored while locked."
+            f"{tile.label}. {state_label}. {submission_count} qualifying submissions; "
+            f"{nonqualifying_count} nonqualifying; {extra_count} additional after completion; "
+            f"{ignored_count} ignored while locked."
         )
         tooltip_id = f"bp-tooltip-{tile.tile_id}"
         status_badge = (
@@ -609,17 +772,44 @@ def render_board_html(
             tip_position += " bp-tip-below"
 
         details: list[str] = []
-        if completion is not None:
+        details.extend(
+            [
+                '<div class="bp-rule"><strong>Completion rule:</strong> '
+                + _escape(rule_summary)
+                + "</div>",
+                '<div class="bp-drop-title">Route progress</div>',
+                '<ul class="bp-routes">'
+                + "".join(f"<li>{_escape(line)}</li>" for line in rule_progress)
+                + "</ul>",
+            ]
+        )
+        if rule_notes:
+            details.append(
+                '<div class="bp-note">'
+                + " ".join(_escape(note) for note in rule_notes)
+                + "</div>"
+            )
+
+        if submissions:
             details.extend(
                 [
-                    '<div class="bp-drop-title">Completing submission</div>',
-                    _submission_markup([completion]),
+                    f'<div class="bp-drop-title">Qualifying submissions ({submission_count})</div>',
+                    _submission_markup(submissions),
                 ]
             )
         elif status == "available":
-            details.append('<div class="bp-empty">No accepted submission yet.</div>')
+            details.append('<div class="bp-empty">No qualifying submission yet.</div>')
         else:
             details.append('<div class="bp-empty">This tile cannot accept a submission yet.</div>')
+
+        if nonqualifying:
+            details.extend(
+                [
+                    f'<div class="bp-drop-title bp-nonqualifying-title">Nonqualifying submissions ({nonqualifying_count})</div>',
+                    '<div class="bp-note bp-nonqualifying-note">These rows were submitted while the tile was open, but did not advance its completion rule.</div>',
+                    _submission_markup(nonqualifying),
+                ]
+            )
 
         if extras:
             details.extend(
@@ -642,7 +832,9 @@ def render_board_html(
         hotspots.append(
             f'<div class="bp-hotspot {state_class}{ignored_class}" '
             f'data-tile-id="{tile.tile_id}" data-status="{status}" '
-            f'data-submission-count="{completion_count}" data-extra-count="{extra_count}" '
+            f'data-submission-count="{submission_count}" '
+            f'data-nonqualifying-count="{nonqualifying_count}" '
+            f'data-extra-count="{extra_count}" '
             f'data-ignored-count="{ignored_count}" '
             f'tabindex="0" role="group" '
             f'aria-label="{aria_label}" aria-describedby="{tooltip_id}" '
@@ -670,7 +862,7 @@ def render_board_html(
     width: 100%;
     max-width: 1208px;
     min-width: 880px;
-    aspect-ratio: 1208 / 682;
+    aspect-ratio: 16 / 9;
     margin: 0 auto;
     isolation: isolate;
   }}
@@ -716,7 +908,7 @@ def render_board_html(
     left: 50%;
     transform: translateX(-50%) translateY(4px);
     width: 280px;
-    max-height: 200px;
+    max-height: 280px;
     overflow-y: auto;
     padding: 12px 13px;
     border: 1px solid rgba(148,163,184,.45);
@@ -749,8 +941,12 @@ def render_board_html(
   .bp-tooltip-title {{ font-size: 15px; font-weight: 850; letter-spacing: .02em; color: white; }}
   .bp-section {{ color: #7dd3fc; font-weight: 700; margin: 1px 0 7px; }}
   .bp-status {{ color: #fde68a; margin-bottom: 7px; }}
-  .bp-unlock, .bp-note {{ color: #cbd5e1; margin: 5px 0; }}
+  .bp-unlock, .bp-rule, .bp-note {{ color: #cbd5e1; margin: 5px 0; }}
   .bp-note {{ padding: 6px 7px; border-radius: 6px; background: rgba(30,41,59,.9); }}
+  .bp-routes {{ margin: 5px 0 0; padding-left: 18px; color: #bae6fd; }}
+  .bp-routes li {{ margin-bottom: 4px; }}
+  .bp-nonqualifying-title {{ color: #fbbf24; }}
+  .bp-nonqualifying-note {{ border-left: 3px solid #f59e0b; }}
   .bp-ignored-title {{ color: #fda4af; }}
   .bp-ignored-note {{ border-left: 3px solid #fb7185; }}
   .bp-drop-title {{ margin-top: 9px; padding-top: 8px; border-top: 1px solid #334155; font-weight: 750; }}
@@ -769,7 +965,7 @@ def render_board_html(
   .bp-legend-ignored::before {{ background: #fb7185; }}
   @media (max-width: 900px) {{
     .bp-board-scroll {{ margin-right: -1rem; padding-right: 1rem; }}
-    .bp-tooltip {{ width: 250px; max-height: 180px; }}
+    .bp-tooltip {{ width: 250px; max-height: 240px; }}
     .bp-team-label::after {{ content: " Scroll sideways to see the full board."; }}
   }}
 </style>
@@ -782,7 +978,7 @@ def render_board_html(
     </div>
   </div>
   <div class="bp-legend">
-    <span class="bp-legend-complete">Provisional complete</span>
+    <span class="bp-legend-complete">Complete</span>
     <span class="bp-legend-available">Available now</span>
     <span class="bp-legend-locked">Locked</span>
     <span class="bp-legend-ignored">Ignored early submission</span>

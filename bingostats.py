@@ -17,7 +17,7 @@ from board_progress import (
 # --- Page Configuration ---
 st.set_page_config(page_title="OSRS Bingo Tracker", layout="wide", page_icon="⚔️")
 APP_DIR = Path(__file__).resolve().parent
-DEFAULT_CSV_PATH = APP_DIR / "Copy of Copy of Winter Bingo 2026 - Event Log - New Log.csv"
+DEFAULT_CSV_PATH = APP_DIR / "Summer Bingo 2026 Event Log.csv"
 WOM_CACHE_FILE = APP_DIR / "wom_group_cache.json"
 BOARD_IMAGE_FILE = APP_DIR / "assets" / "bingoboard.png"
 TILE_RULES_FILE = APP_DIR / "tile_rules.json"
@@ -117,8 +117,8 @@ def load_and_clean_data(file):
         elif 'Points' in df.columns:
             df['Final_Points'] = df['Points']
         else:
-            # Keep a neutral internal column so legacy analysis helpers remain
-            # structurally compatible until the tile-race rules are finalized.
+            # Keep a neutral internal column so legacy point-analysis helpers
+            # remain structurally compatible with authoritative tile-race data.
             df['Final_Points'] = 0
 
         target_cols = required_cols + ['Final_Points', 'Submission_Order', 'Source_Row']
@@ -363,14 +363,14 @@ def main():
         st.header("Data Source")
         uploaded_file = st.file_uploader("Optional: Upload a replacement CSV", type=['csv'])
 
-    using_bundled_archive = uploaded_file is None and DEFAULT_CSV_PATH.exists()
+    using_bundled_default = uploaded_file is None and DEFAULT_CSV_PATH.exists()
     data_source = uploaded_file if uploaded_file is not None else (DEFAULT_CSV_PATH if DEFAULT_CSV_PATH.exists() else None)
 
     if data_source is not None:
-        if using_bundled_archive:
-            st.warning(
-                "No Summer event log is uploaded. The dashboard is showing the bundled prior-event "
-                "archive as demo data; it is not current Summer progress."
+        if using_bundled_default:
+            st.info(
+                "Showing the bundled Summer Bingo 2026 event log. "
+                "Upload a replacement CSV from the sidebar to preview different data."
             )
         df, has_points = load_and_clean_data(data_source)
         
@@ -390,10 +390,11 @@ def main():
             if has_points:
                 col2.metric("Total Points", f"{int(df['Points'].sum()):,}")
             else:
-                total_completed_tiles = sum(
-                    progress['completed_count'] for progress in team_progress_by_name.values()
+                total_completed_race_tiles = sum(
+                    progress['race_completed_count']
+                    for progress in team_progress_by_name.values()
                 )
-                col2.metric("Completed Tiles", f"{total_completed_tiles:,}")
+                col2.metric("Completed Race Tiles", f"{total_completed_race_tiles:,}")
 
             player_activity = df.groupby('Player')[activity_col].sum()
             top_player = player_activity.idxmax()
@@ -412,19 +413,23 @@ def main():
                 leading_team, leading_progress = sorted(
                     team_progress_by_name.items(),
                     key=lambda item: (
-                        -item[1]['completed_count'],
+                        -item[1]['race_completed_count'],
                         -item[1]['section_rank'],
                         -item[1]['section_completed'],
                         item[0],
                     ),
                 )[0]
                 col4.metric(
-                    "Leading Team (Provisional)",
+                    "Leading Team",
                     leading_team,
-                    f"{leading_progress['completed_count']}/31 tiles",
+                    (
+                        f"{leading_progress['race_completed_count']}/"
+                        f"{leading_progress['race_total']} race tiles"
+                        + (" · Corp bonus complete" if leading_progress['bonus_complete'] else "")
+                    ),
                 )
             else:
-                col4.metric("Leading Team (Provisional)", "N/A")
+                col4.metric("Leading Team", "N/A")
 
             st.divider()
             valid_event_dates = df["Date"].dropna()
@@ -468,12 +473,13 @@ def main():
                 "💾 Cleaned Data"
             ])
 
-            # PROVISIONAL BOARD PROGRESS
+            # AUTHORITATIVE BOARD PROGRESS
             with tab_board:
                 st.subheader("Interactive Board Progress")
                 st.info(
-                    "Provisional rule: the first eligible submission finishes a tile. Submissions "
-                    "received while a tile is locked do not count and are not banked for later."
+                    "Tiles complete only when a configured item route is satisfied. Qualifying "
+                    "submissions count only after that tile unlocks and locked submissions are not "
+                    "banked. The one prepared Corrupted Gauntlet chest is the only pre-unlock exception."
                 )
 
                 if board_teams:
@@ -484,14 +490,22 @@ def main():
                     )
                     selected_progress = team_progress_by_name[selected_board_team]
 
-                    bm1, bm2, bm3, bm4 = st.columns(4)
-                    bm1.metric("Completed Tiles", f"{selected_progress['completed_count']}/31")
+                    bm1, bm2, bm3, bm4, bm5, bm6 = st.columns(6)
+                    bm1.metric(
+                        "Race Tiles",
+                        f"{selected_progress['race_completed_count']}/{selected_progress['race_total']}",
+                    )
                     bm2.metric(
                         selected_progress['current_section'],
                         f"{selected_progress['section_completed']}/{selected_progress['section_total']}",
                     )
-                    bm3.metric("Ignored While Locked", selected_progress['ignored_locked_count'])
-                    bm4.metric("Unmatched Submissions", selected_progress['unmatched_count'])
+                    bm3.metric(
+                        "Corp Bonus",
+                        "Complete" if selected_progress['bonus_complete'] else "Not complete",
+                    )
+                    bm4.metric("Ignored While Locked", selected_progress['ignored_locked_count'])
+                    bm5.metric("Nonqualifying", selected_progress['nonqualifying_count'])
+                    bm6.metric("Unmatched Submissions", selected_progress['unmatched_count'])
                     st.caption(f"Next objective: {selected_progress['next_objective']}")
 
                     if BOARD_IMAGE_FILE.exists():
@@ -509,19 +523,27 @@ def main():
                     st.caption(
                         "Hallway 1 is TOA → NEX → HUEYCOATL. The first grid is any-order. Hallway 2 "
                         "is VOIDWAKER → PNM/NIGHTMARE → COX, followed by the any-order final grid. "
-                        "CG alone is available from the start using the team's opening chest."
+                        "Those 30 progression tiles determine the race; Corp Beast unlocks afterward "
+                        "as a separate bonus. CG alone can receive one opening-chest submission at the start."
                     )
 
-                    with st.expander("Ignored and unmatched submission diagnostics"):
+                    with st.expander(
+                        "Ignored, nonqualifying, and unmatched submission diagnostics"
+                    ):
                         diagnostic_rows = (
-                            selected_progress['ignored_locked'] + selected_progress['unmatched']
+                            selected_progress['ignored_locked']
+                            + selected_progress['nonqualifying']
+                            + selected_progress['unmatched']
                         )
                         if not diagnostic_rows:
-                            st.success("No locked or unmatched submissions were found for this team.")
+                            st.success(
+                                "No locked, nonqualifying, or unmatched submissions were found for this team."
+                            )
                         else:
                             st.warning(
-                                "These rows did not complete a tile. Locked rows require a fresh "
-                                "submission after the tile becomes available."
+                                "These rows did not advance board progress. Locked rows require a fresh "
+                                "submission after the tile becomes available; the reason column explains "
+                                "items rejected by the completion rule or tile-name matching."
                             )
                             diagnostic_df = pd.DataFrame(diagnostic_rows)
                             diagnostic_columns = [
@@ -543,10 +565,16 @@ def main():
                                 "arrived after every matching physical slot was already complete."
                             )
 
-                    with st.expander("Provisional tile rules (31 board slots)"):
+                    with st.expander(
+                        "Completion rules (30 race tiles + Corp bonus)"
+                    ):
                         st.caption(
-                            "Each slot currently needs one eligible submission. These provisional "
-                            "rules can be replaced when the official item requirements arrive."
+                            "A tile completes only when one of its listed routes is fully satisfied. "
+                            "The 30 progression tiles decide race standings; Corp Beast is shown as a "
+                            "separate post-race bonus and does not increase the race total. The 24 grid "
+                            "routes mirror planner checklist v1 and the six hallways mirror its goal "
+                            "definitions. Corp's component recipe is inferred from the supplied event log "
+                            "because the planner does not define that bonus checklist."
                         )
                         st.dataframe(
                             pd.DataFrame(board_readiness_rows(board_rules)),
@@ -561,7 +589,7 @@ def main():
                 c1, c2 = st.columns(2)
                 
                 with c1:
-                    st.subheader("Team Standings (Official)" if has_points else "Team Board Progress (Provisional)")
+                    st.subheader("Team Standings (Official)" if has_points else "Team Race Standings")
                     if has_points:
                         team_df = (
                             df.groupby('Team')[activity_col]
@@ -576,18 +604,24 @@ def main():
                         )
                     else:
                         st.caption(
-                            "Ranked using the provisional first-eligible-submission rule."
+                            "Ranked by completed race tiles, then current board section and section progress. "
+                            "The Corp Beast bonus is displayed separately and does not affect rank."
                         )
                         team_df = pd.DataFrame(
                             [
                                 {
                                     "Team": team,
-                                    "Completed Tiles": progress['completed_count'],
+                                    "Race Tiles": progress['race_completed_count'],
+                                    "Race Total": progress['race_total'],
+                                    "Corp Bonus": (
+                                        "Complete" if progress['bonus_complete'] else "Not complete"
+                                    ),
                                     "Current Section": progress['current_section'],
                                     "Section Progress": (
                                         f"{progress['section_completed']}/{progress['section_total']}"
                                     ),
                                     "Ignored Locked": progress['ignored_locked_count'],
+                                    "Nonqualifying": progress['nonqualifying_count'],
                                     "Submissions": int((df['Team'] == team).sum()),
                                     "_Section Completed": progress['section_completed'],
                                     "_Section Rank": progress['section_rank'],
@@ -595,7 +629,7 @@ def main():
                                 for team, progress in team_progress_by_name.items()
                             ]
                         ).sort_values(
-                            ["Completed Tiles", "_Section Rank", "_Section Completed", "Team"],
+                            ["Race Tiles", "_Section Rank", "_Section Completed", "Team"],
                             ascending=[False, False, False, True],
                         )
                         team_df = team_df.drop(

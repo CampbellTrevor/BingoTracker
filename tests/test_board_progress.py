@@ -200,13 +200,18 @@ class BoardProgressTests(unittest.TestCase):
         self.assertEqual(progress["section_completed"], 30)
         self.assertEqual(progress["section_total"], 30)
         self.assertEqual(progress["next_objective"], "Everything is finished")
-        self.assertEqual(progress["ignored_locked_count"], 0)
         self.assertEqual(progress["nonqualifying_count"], 0)
         self.assertEqual(progress["unmatched_count"], 0)
         self.assertEqual(progress["extra_submission_count"], 0)
+        self.assertNotIn("ignored_locked", progress)
+        self.assertNotIn("ignored_locked_count", progress)
+        self.assertNotIn("cg_starting_chest_used", progress)
         self.assertEqual(len(progress["accepted"]), len(self.example_team))
         self.assertTrue(
             all(state["status"] == "complete" for state in progress["states"].values())
+        )
+        self.assertTrue(
+            all("locked_attempts" not in state for state in progress["states"].values())
         )
 
     def test_topology_waits_for_true_completions_and_opens_grids_in_any_order(self):
@@ -245,7 +250,7 @@ class BoardProgressTests(unittest.TestCase):
         final_grid_open = self.example_through(59)
         self.assertEqual(final_grid_open["current_section"], "Final grid")
         self.assertEqual(
-            final_grid_open["states"]["bonus_corp_beast"]["status"], "locked"
+            final_grid_open["states"]["bonus_corp_beast"]["status"], "available"
         )
         self.assertTrue(
             all(
@@ -278,7 +283,7 @@ class BoardProgressTests(unittest.TestCase):
         )
         self.assertEqual(any_order["states"]["grid_gwd"]["status"], "available")
 
-    def test_partial_progress_does_not_unlock_and_locked_rows_never_bank(self):
+    def test_authoritative_rows_count_even_before_their_apparent_unlock(self):
         events = [
             ("Nex", "Ancient Hilt"),
             ("Tombs of Amascut", "Lightbearer"),
@@ -292,29 +297,28 @@ class BoardProgressTests(unittest.TestCase):
         states = progress["states"]
 
         self.assertEqual(states["start_toa"]["status"], "complete")
+        self.assertEqual(states["start_nex"]["status"], "complete")
         self.assertEqual(len(states["start_nex"]["submissions"]), 2)
-        self.assertEqual(len(states["start_nex"]["locked_attempts"]), 2)
-        self.assertEqual(states["start_nex"]["completion"]["Item"], "Nihil Horn")
+        self.assertEqual(len(states["start_nex"]["extras"]), 2)
+        self.assertEqual(states["start_nex"]["completion"]["Item"], "Torva Platebody")
         self.assertEqual(states["start_hueycoatl"]["status"], "available")
-        self.assertEqual(states["start_hueycoatl"]["submissions"], [])
-        self.assertEqual(len(states["start_hueycoatl"]["locked_attempts"]), 1)
-        self.assertEqual(progress["ignored_locked_count"], 3)
+        self.assertEqual(len(states["start_hueycoatl"]["submissions"]), 1)
+        self.assertIn(
+            "Accepted unique drops 1/2",
+            "\n".join(states["start_hueycoatl"]["rule_progress"]),
+        )
+        self.assertNotIn("locked_attempts", states["start_nex"])
+        self.assertNotIn("ignored_locked_count", progress)
 
         one_real_huey = self.calculate(
             events + [("Hueycoatl", "Dragon Hunter Wand")]
         )
         self.assertEqual(
-            one_real_huey["states"]["start_hueycoatl"]["status"], "available"
-        )
-        self.assertIn(
-            "Accepted unique drops 1/2",
-            "\n".join(
-                one_real_huey["states"]["start_hueycoatl"]["rule_progress"]
-            ),
+            one_real_huey["states"]["start_hueycoatl"]["status"], "complete"
         )
         self.assertTrue(
             all(
-                one_real_huey["states"][tile.tile_id]["status"] == "locked"
+                one_real_huey["states"][tile.tile_id]["status"] == "available"
                 for tile in BOARD_TILES
                 if tile.stage == "grid_one"
             )
@@ -334,37 +338,34 @@ class BoardProgressTests(unittest.TestCase):
             len(completed_huey["states"]["start_hueycoatl"]["submissions"]), 2
         )
 
-    def test_exactly_one_starting_cg_chest_can_contribute_before_final_grid(self):
+    def test_all_logged_cg_rows_count_regardless_of_apparent_gate(self):
         enhanced = self.calculate(
             [("Gauntlet", "Enhanced Crystal Weapon Seed", "Opening Chest")]
         )
-        self.assertTrue(enhanced["cg_starting_chest_used"])
         self.assertTrue(enhanced["cg_complete"])
         self.assertEqual(enhanced["race_completed_count"], 1)
         self.assertEqual(
             enhanced["states"]["final_corrupted_gauntlet"]["status"], "complete"
         )
         self.assertEqual(enhanced["states"]["start_toa"]["status"], "available")
+        self.assertNotIn("cg_starting_chest_used", enhanced)
 
         events = [
-            ("Gauntlet", "Crystal Armour Seed", "Opening Chest"),
-            ("Gauntlet", "Crystal Armour Seed", "Too Early"),
-            *example_events(2, 59),
+            ("Gauntlet", "Crystal Armour Seed", f"Seed {index}")
+            for index in range(1, 3)
         ]
-        final_grid_open = self.calculate(events)
-        cg = final_grid_open["states"]["final_corrupted_gauntlet"]
-        self.assertTrue(final_grid_open["cg_starting_chest_used"])
-        self.assertFalse(final_grid_open["cg_complete"])
+        partial = self.calculate(events)
+        cg = partial["states"]["final_corrupted_gauntlet"]
+        self.assertFalse(partial["cg_complete"])
         self.assertEqual(cg["status"], "available")
-        self.assertEqual(len(cg["submissions"]), 1)
-        self.assertEqual(len(cg["locked_attempts"]), 1)
-        self.assertIn("Crystal armour seeds 1/5", "\n".join(cg["rule_progress"]))
+        self.assertEqual(len(cg["submissions"]), 2)
+        self.assertIn("Crystal armour seeds 2/5", "\n".join(cg["rule_progress"]))
 
-        four_more = events + [
-            ("Gauntlet", "Crystal Armour Seed", f"Final Grid {index}")
-            for index in range(1, 5)
+        five_seeds = events + [
+            ("Gauntlet", "Crystal Armour Seed", f"Seed {index}")
+            for index in range(3, 6)
         ]
-        completed = self.calculate(four_more)
+        completed = self.calculate(five_seeds)
         self.assertTrue(completed["cg_complete"])
         self.assertEqual(
             len(completed["states"]["final_corrupted_gauntlet"]["submissions"]),
@@ -372,35 +373,31 @@ class BoardProgressTests(unittest.TestCase):
         )
         self.assertEqual(
             completed["states"]["final_corrupted_gauntlet"]["completion"]["Player"],
-            "Final Grid 4",
+            "Seed 5",
         )
 
-    def test_yama_rejects_soulflame_horns_and_requires_three_qualifying_drops(self):
-        gate_events = example_events(1, 59)
-        horns_and_two_drops = gate_events + [
-            *[("Yama", "Soulflame Horn", f"Horn {index}") for index in range(7)],
-            ("Yama", "Oathplate Helm", "Yama One"),
-            ("Yama", "Oathplate Helm", "Yama Two"),
+    def test_yama_accepts_duplicate_soulflame_horns_toward_any_three(self):
+        two_horns = [
+            ("Yama", "Soulflame Horn", f"Horn {index}")
+            for index in range(1, 3)
         ]
-        partial = self.calculate(horns_and_two_drops)
+        partial = self.calculate(two_horns)
         yama = partial["states"]["final_yama"]
 
-        self.assertEqual(yama["status"], "available")
-        self.assertEqual(len(yama["nonqualifying"]), 7)
+        self.assertEqual(yama["status"], "locked")
+        self.assertIsNone(yama["completion"])
+        self.assertEqual(len(yama["nonqualifying"]), 0)
         self.assertEqual(len(yama["submissions"]), 2)
-        self.assertEqual(partial["nonqualifying_count"], 7)
-        self.assertTrue(
-            all(row["Item"] == "Soulflame Horn" for row in yama["nonqualifying"])
-        )
+        self.assertEqual(partial["nonqualifying_count"], 0)
         self.assertIn("Qualifying occurrences 2/3", "\n".join(yama["rule_progress"]))
 
         complete = self.calculate(
-            horns_and_two_drops + [("Yama", "Oathplate Helm", "Yama Three")]
+            two_horns + [("Yama", "Soulflame Horn", "Horn 3")]
         )
         self.assertEqual(complete["states"]["final_yama"]["status"], "complete")
         self.assertEqual(
             complete["states"]["final_yama"]["completion"]["Player"],
-            "Yama Three",
+            "Horn 3",
         )
 
     def test_long_toa_and_cox_names_target_only_their_physical_slots(self):
@@ -418,14 +415,11 @@ class BoardProgressTests(unittest.TestCase):
         progress = self.calculate(events)
         states = progress["states"]
 
-        self.assertEqual(progress["ignored_locked_count"], 2)
         self.assertEqual(
-            [row["Player"] for row in states["final_toa"]["locked_attempts"]],
-            ["Early Final TOA"],
+            states["final_toa"]["completion"]["Player"], "Early Final TOA"
         )
         self.assertEqual(
-            [row["Player"] for row in states["final_cox"]["locked_attempts"]],
-            ["Early Final COX"],
+            states["final_cox"]["completion"]["Player"], "Early Final COX"
         )
         self.assertEqual(
             [row["Player"] for row in states["start_toa"]["extras"]],
@@ -436,13 +430,16 @@ class BoardProgressTests(unittest.TestCase):
             ["Regular Long COX"],
         )
         self.assertEqual(
-            states["final_cox"]["completion"]["Player"], "Explicit Final COX"
+            [row["Player"] for row in states["final_cox"]["extras"]],
+            ["Explicit Final COX"],
         )
         self.assertEqual(
-            states["final_toa"]["completion"]["Player"], "Explicit Final TOA"
+            [row["Player"] for row in states["final_toa"]["extras"]],
+            ["Explicit Final TOA"],
         )
+        self.assertNotIn("ignored_locked_count", progress)
 
-    def test_megarare_used_in_earlier_stage_blocks_only_that_final_route(self):
+    def test_megarare_blocks_are_stage_ordered_and_only_block_that_final_route(self):
         through_final_gate = example_events(
             1,
             59,
@@ -452,10 +449,14 @@ class BoardProgressTests(unittest.TestCase):
                 58: "Twisted Bow",
             },
         )
-        blocked_megas = through_final_gate + [
-            ("Theatre of Blood", "Scythe of Vitur", "Blocked Scythe"),
+        # Explicit final-grid rows deliberately appear before their earlier-stage
+        # blockers. Stage-ordered replay must still apply those blockers. TOB has
+        # one shared CSV label, so its final submission follows first-grid TOB.
+        blocked_megas = [
             ("Chambers of Xeric 2", "Twisted Bow", "Blocked Bow"),
             ("Tombs of Amascut 2", "Tumeken's Shadow", "Blocked Shadow"),
+            *through_final_gate,
+            ("Theatre of Blood", "Scythe of Vitur", "Blocked Scythe"),
         ]
         blocked = self.calculate(blocked_megas)
 
@@ -490,7 +491,25 @@ class BoardProgressTests(unittest.TestCase):
         self.assertEqual(completed["states"]["final_cox"]["status"], "complete")
         self.assertEqual(completed["states"]["final_toa"]["status"], "complete")
 
-    def test_race_finishes_before_corp_and_corp_remains_a_separate_bonus(self):
+    def test_corp_opens_with_second_grid_and_remains_a_separate_bonus(self):
+        second_grid_open = self.example_through(59)
+        self.assertEqual(second_grid_open["current_section"], "Final grid")
+        self.assertEqual(
+            second_grid_open["states"]["bonus_corp_beast"]["status"],
+            "available",
+        )
+
+        corp_before_final_grid = self.calculate(
+            example_events(1, 59) + example_events(88, 90)
+        )
+        self.assertTrue(corp_before_final_grid["bonus_complete"])
+        self.assertEqual(
+            corp_before_final_grid["states"]["bonus_corp_beast"]["status"],
+            "complete",
+        )
+        self.assertEqual(corp_before_final_grid["current_section"], "Final grid")
+        self.assertLess(corp_before_final_grid["race_completed_count"], 30)
+
         race_complete = self.example_through(87)
 
         self.assertEqual(race_complete["race_completed_count"], 30)
@@ -518,7 +537,7 @@ class BoardProgressTests(unittest.TestCase):
         self.assertEqual(corp_complete["current_section"], "Race complete")
         self.assertEqual(corp_complete["next_objective"], "Everything is finished")
 
-    def test_submission_order_not_date_controls_unlocks(self):
+    def test_dates_do_not_invalidate_authoritative_submissions(self):
         events = [
             ("Nex", "Ancient Hilt", "Early", pd.NaT),
             (
@@ -538,10 +557,11 @@ class BoardProgressTests(unittest.TestCase):
 
         self.assertEqual(progress["states"]["start_toa"]["status"], "complete")
         self.assertEqual(progress["states"]["start_nex"]["status"], "available")
-        self.assertEqual(progress["states"]["start_nex"]["submissions"], [])
         self.assertEqual(
-            len(progress["states"]["start_nex"]["locked_attempts"]), 1
+            [row["Player"] for row in progress["states"]["start_nex"]["submissions"]],
+            ["Early"],
         )
+        self.assertNotIn("locked_attempts", progress["states"]["start_nex"])
 
     def test_team_replays_are_isolated(self):
         aocl_events = [
@@ -581,15 +601,16 @@ class BoardProgressTests(unittest.TestCase):
 
         self.assertEqual(markup.count('data-tile-id="'), 31)
         self.assertIn(
-            'data-tile-id="final_corrupted_gauntlet" data-status="locked"',
+            'data-tile-id="final_corrupted_gauntlet" data-status="available"',
             markup,
         )
         self.assertIn('data-tile-id="start_toa" data-status="available"', markup)
         self.assertIn('data-tile-id="start_nex" data-status="locked"', markup)
-        self.assertIn("Crystal armour seeds 1/5", markup)
+        self.assertIn("Crystal armour seeds 2/5", markup)
         self.assertIn("Accepted unique drops 1/2", markup)
         self.assertIn("Nonqualifying submissions (1)", markup)
-        self.assertIn("Ignored while locked (1)", markup)
+        self.assertNotIn("Ignored while locked", markup)
+        self.assertNotIn("data-ignored-count", markup)
         self.assertIn("&lt;script&gt;alert(2)&lt;/script&gt;", markup)
         self.assertIn("Locked &lt;svg onload=alert(3)&gt;", markup)
         self.assertIn("Alice &amp; Bob", markup)

@@ -8,6 +8,7 @@ import json
 import requests
 
 from board_progress import (
+    BONUS_TILE_ID,
     board_readiness_rows,
     calculate_team_progress,
     load_tile_rules,
@@ -33,41 +34,62 @@ WOM_PLAYER_ALIASES = {
 }
 SUPPORTED_WOM_BOSS_METRICS = {
     "abyssal_sire", "alchemical_hydra", "amoxliatl", "araxxor", "artio",
-    "barrows_chests", "bryophyta", "callisto", "calvarion", "cerberus",
+    "barrows_chests", "brutus", "bryophyta", "callisto", "calvarion", "cerberus",
     "chambers_of_xeric", "chambers_of_xeric_challenge_mode", "chaos_elemental",
     "chaos_fanatic", "commander_zilyana", "corporeal_beast", "crazy_archaeologist",
     "dagannoth_prime", "dagannoth_rex", "dagannoth_supreme", "deranged_archaeologist",
     "doom_of_mokhaiotl", "duke_sucellus", "general_graardor", "giant_mole",
     "grotesque_guardians", "hespori", "kalphite_queen", "king_black_dragon",
-    "kraken", "kreearra", "kril_tsutsaroth", "lunar_chests", "mimic",
-    "nex", "nightmare", "obor", "phosanis_nightmare", "royal_titans",
-    "scorpia", "skotizo", "sol_heredit", "spindel", "tempoross", "the_hueycoatl",
-    "the_leviathan", "the_royal_titans", "the_whisperer", "theatre_of_blood",
-    "theatre_of_blood_hard_mode", "thermonuclear_smoke_devil", "tombs_of_amascut",
-    "tombs_of_amascut_expert", "tzkal_zuk", "tztok_jad", "vardorvis",
-    "venenatis", "vetion", "vorkath", "wintertodt", "yama", "zalcano", "zulrah",
+    "kraken", "kreearra", "kril_tsutsaroth", "lunar_chests", "mad_angel",
+    "maggot_king", "mimic", "nex", "nightmare", "obor", "phantom_muspah",
+    "phosanis_nightmare", "sarachnis", "scorpia", "scurrius", "shellbane_gryphon",
+    "skotizo", "sol_heredit", "spindel", "tempoross", "the_corrupted_gauntlet",
+    "the_gauntlet", "the_hueycoatl", "the_leviathan", "the_royal_titans",
+    "the_whisperer", "theatre_of_blood", "theatre_of_blood_hard_mode",
+    "thermonuclear_smoke_devil", "tombs_of_amascut", "tombs_of_amascut_expert",
+    "tzkal_zuk", "tztok_jad", "vardorvis", "venenatis", "vetion", "vorkath",
+    "wintertodt", "yama", "zalcano", "zulrah",
 }
 
 # Maps bingo categories to Wise Old Man boss metrics for KC gains.
 CATEGORY_TO_WOM_BOSSES = {
+    # Summer Bingo 2026 categories with a corresponding WOM boss metric.
+    "Araxxor": ["araxxor"],
+    "Barrows": ["barrows_chests"],
+    "Cerberus": ["cerberus"],
+    "Chambers of Xeric": ["chambers_of_xeric", "chambers_of_xeric_challenge_mode"],
+    "Chambers of Xeric 2": ["chambers_of_xeric", "chambers_of_xeric_challenge_mode"],
+    "Corporeal Beast": ["corporeal_beast"],
     "Dagannoth Kings": ["dagannoth_prime", "dagannoth_rex", "dagannoth_supreme"],
+    "Desert Treasure 2": ["duke_sucellus", "the_leviathan", "the_whisperer", "vardorvis"],
+    "Doom of Mokhaiotl": ["doom_of_mokhaiotl"],
+    "Fortis Colosseum": ["sol_heredit"],
+    "Gauntlet": ["the_gauntlet", "the_corrupted_gauntlet"],
+    "God Wars Dungeon": ["general_graardor", "kreearra", "commander_zilyana", "kril_tsutsaroth"],
+    "Hueycoatl": ["the_hueycoatl"],
+    "Inferno": ["tzkal_zuk"],
+    "Mad Angel": ["mad_angel"],
+    "Maggot King": ["maggot_king"],
+    "Muspah": ["phantom_muspah"],
+    "Nex": ["nex"],
+    "Nightmare / PNM": ["nightmare", "phosanis_nightmare"],
+    "Royal Titans": ["the_royal_titans"],
+    "Theatre of Blood": ["theatre_of_blood", "theatre_of_blood_hard_mode"],
+    "Tombs of Amascut": ["tombs_of_amascut", "tombs_of_amascut_expert"],
+    "Tombs of Amascut 2": ["tombs_of_amascut", "tombs_of_amascut_expert"],
+    "Voidwaker": ["callisto", "artio", "vetion", "calvarion", "venenatis", "spindel"],
+    "Vorkath": ["vorkath"],
+    "Yama": ["yama"],
+    "Zulrah": ["zulrah"],
+
+    # Legacy category labels retained for prior event logs and uploads.
     "Barrows / Moons": ["barrows_chests", "lunar_chests"],
     "Dragons": ["vorkath", "king_black_dragon"],
-    "God Wars Dungeon": ["general_graardor", "kreearra", "commander_zilyana", "kril_tsutsaroth", "nex"],
-    "Royal Titans": ["the_royal_titans"],
     "Tormented / Demonics": [],
     "Colo / Inferno": ["tzkal_zuk", "sol_heredit"],
     "DT2 Bosses": ["duke_sucellus", "the_leviathan", "the_whisperer", "vardorvis"],
     "Spider / Bear / Skeleton": ["callisto", "artio", "vetion", "calvarion", "venenatis", "spindel"],
     "Slayer Bosses": ["abyssal_sire", "alchemical_hydra", "cerberus", "grotesque_guardians", "kraken", "thermonuclear_smoke_devil"],
-    "Zulrah": ["zulrah"],
-    "Chambers of Xeric": ["chambers_of_xeric", "chambers_of_xeric_challenge_mode"],
-    "Tombs of Amascut": ["tombs_of_amascut", "tombs_of_amascut_expert"],
-    "Doom of Mokhaiotl": ["doom_of_mokhaiotl"],
-    "Nex": ["nex"],
-    "Yama": ["yama"],
-    "Nightmare / PNM": ["nightmare", "phosanis_nightmare"],
-    "Theatre of Blood": ["theatre_of_blood", "theatre_of_blood_hard_mode"],
     "Zalcano": ["zalcano"],
 }
 
@@ -168,6 +190,79 @@ def _resolve_csv_player_to_wom_key(player_name):
     if alias_target:
         return _normalize_name(alias_target)
     return _normalize_name(raw_name)
+
+
+def build_player_contribution_rankings(df, team_progress_by_name):
+    """Rank players by the board progress their submissions produced."""
+
+    submissions = (
+        df.groupby(["Player", "Team"], as_index=False)["Quantity"]
+        .sum()
+        .rename(columns={"Quantity": "Total Submissions"})
+    )
+
+    accepted_rows = [
+        row
+        for progress in team_progress_by_name.values()
+        for row in progress.get("accepted", [])
+    ]
+    if accepted_rows:
+        accepted = pd.DataFrame(accepted_rows)
+        accepted["Qualifying Drops"] = 1
+        accepted["Race Tiles Finished"] = (
+            (accepted["Disposition"] == "Completed tile")
+            & (accepted["Board Slot"] != BONUS_TILE_ID)
+        ).astype(int)
+        accepted["Corp Tile Finished"] = (
+            (accepted["Disposition"] == "Completed tile")
+            & (accepted["Board Slot"] == BONUS_TILE_ID)
+        ).astype(int)
+        contribution = (
+            accepted.groupby(["Player", "Team"], as_index=False)[
+                ["Race Tiles Finished", "Corp Tile Finished", "Qualifying Drops"]
+            ]
+            .sum()
+        )
+        rankings = submissions.merge(
+            contribution,
+            on=["Player", "Team"],
+            how="left",
+        )
+    else:
+        rankings = submissions.copy()
+        rankings["Race Tiles Finished"] = 0
+        rankings["Corp Tile Finished"] = 0
+        rankings["Qualifying Drops"] = 0
+
+    count_columns = [
+        "Race Tiles Finished",
+        "Corp Tile Finished",
+        "Qualifying Drops",
+        "Total Submissions",
+    ]
+    rankings[count_columns] = rankings[count_columns].fillna(0).astype(int)
+    rankings = rankings.sort_values(
+        [
+            "Race Tiles Finished",
+            "Corp Tile Finished",
+            "Qualifying Drops",
+            "Total Submissions",
+            "Player",
+        ],
+        ascending=[False, False, False, False, True],
+    ).reset_index(drop=True)
+    rankings.insert(0, "Rank", range(1, len(rankings) + 1))
+    return rankings[
+        [
+            "Rank",
+            "Player",
+            "Team",
+            "Race Tiles Finished",
+            "Corp Tile Finished",
+            "Qualifying Drops",
+            "Total Submissions",
+        ]
+    ]
 
 
 def _wom_retry_delay_seconds(response, attempt):
@@ -363,15 +458,9 @@ def main():
         st.header("Data Source")
         uploaded_file = st.file_uploader("Optional: Upload a replacement CSV", type=['csv'])
 
-    using_bundled_default = uploaded_file is None and DEFAULT_CSV_PATH.exists()
     data_source = uploaded_file if uploaded_file is not None else (DEFAULT_CSV_PATH if DEFAULT_CSV_PATH.exists() else None)
 
     if data_source is not None:
-        if using_bundled_default:
-            st.info(
-                "Showing the bundled Summer Bingo 2026 event log. "
-                "Upload a replacement CSV from the sidebar to preview different data."
-            )
         df, has_points = load_and_clean_data(data_source)
         
         if not df.empty:
@@ -476,11 +565,6 @@ def main():
             # AUTHORITATIVE BOARD PROGRESS
             with tab_board:
                 st.subheader("Interactive Board Progress")
-                st.info(
-                    "Tiles complete only when a configured item route is satisfied. Qualifying "
-                    "submissions count only after that tile unlocks and locked submissions are not "
-                    "banked. The one prepared Corrupted Gauntlet chest is the only pre-unlock exception."
-                )
 
                 if board_teams:
                     selected_board_team = st.selectbox(
@@ -490,7 +574,7 @@ def main():
                     )
                     selected_progress = team_progress_by_name[selected_board_team]
 
-                    bm1, bm2, bm3, bm4, bm5, bm6 = st.columns(6)
+                    bm1, bm2, bm3, bm4, bm5 = st.columns(5)
                     bm1.metric(
                         "Race Tiles",
                         f"{selected_progress['race_completed_count']}/{selected_progress['race_total']}",
@@ -503,9 +587,8 @@ def main():
                         "Corp Bonus",
                         "Complete" if selected_progress['bonus_complete'] else "Not complete",
                     )
-                    bm4.metric("Ignored While Locked", selected_progress['ignored_locked_count'])
-                    bm5.metric("Nonqualifying", selected_progress['nonqualifying_count'])
-                    bm6.metric("Unmatched Submissions", selected_progress['unmatched_count'])
+                    bm4.metric("Nonqualifying", selected_progress['nonqualifying_count'])
+                    bm5.metric("Unmatched Submissions", selected_progress['unmatched_count'])
                     st.caption(f"Next objective: {selected_progress['next_objective']}")
 
                     if BOARD_IMAGE_FILE.exists():
@@ -520,62 +603,36 @@ def main():
                     else:
                         st.error(f"Board image is missing: {BOARD_IMAGE_FILE.name}")
 
-                    st.caption(
-                        "Hallway 1 is TOA → NEX → HUEYCOATL. The first grid is any-order. Hallway 2 "
-                        "is VOIDWAKER → PNM/NIGHTMARE → COX, followed by the any-order final grid. "
-                        "Those 30 progression tiles determine the race; Corp Beast unlocks afterward "
-                        "as a separate bonus. CG alone can receive one opening-chest submission at the start."
+                    diagnostic_rows = (
+                        selected_progress['nonqualifying']
+                        + selected_progress['unmatched']
                     )
-
-                    with st.expander(
-                        "Ignored, nonqualifying, and unmatched submission diagnostics"
-                    ):
-                        diagnostic_rows = (
-                            selected_progress['ignored_locked']
-                            + selected_progress['nonqualifying']
-                            + selected_progress['unmatched']
-                        )
-                        if not diagnostic_rows:
-                            st.success(
-                                "No locked, nonqualifying, or unmatched submissions were found for this team."
-                            )
-                        else:
-                            st.warning(
-                                "These rows did not advance board progress. Locked rows require a fresh "
-                                "submission after the tile becomes available; the reason column explains "
-                                "items rejected by the completion rule or tile-name matching."
-                            )
-                            diagnostic_df = pd.DataFrame(diagnostic_rows)
-                            diagnostic_columns = [
-                                column
-                                for column in (
-                                    'Date', 'Player', 'Category', 'Item',
-                                    'Board Slot', 'Disposition', 'Reason'
+                    if diagnostic_rows or selected_progress['extra_submission_count']:
+                        with st.expander("Submission diagnostics"):
+                            if diagnostic_rows:
+                                diagnostic_df = pd.DataFrame(diagnostic_rows)
+                                diagnostic_columns = [
+                                    column
+                                    for column in (
+                                        'Date', 'Player', 'Category', 'Item',
+                                        'Board Slot', 'Disposition', 'Reason'
+                                    )
+                                    if column in diagnostic_df.columns
+                                ]
+                                st.dataframe(
+                                    diagnostic_df[diagnostic_columns],
+                                    hide_index=True,
+                                    width='stretch',
                                 )
-                                if column in diagnostic_df.columns
-                            ]
-                            st.dataframe(
-                                diagnostic_df[diagnostic_columns],
-                                hide_index=True,
-                                width='stretch',
-                            )
-                        if selected_progress['extra_submission_count']:
-                            st.caption(
-                                f"{selected_progress['extra_submission_count']} additional submission(s) "
-                                "arrived after every matching physical slot was already complete."
-                            )
+                            if selected_progress['extra_submission_count']:
+                                st.metric(
+                                    "Additional After Completion",
+                                    selected_progress['extra_submission_count'],
+                                )
 
                     with st.expander(
                         "Completion rules (30 race tiles + Corp bonus)"
                     ):
-                        st.caption(
-                            "A tile completes only when one of its listed routes is fully satisfied. "
-                            "The 30 progression tiles decide race standings; Corp Beast is shown as a "
-                            "separate post-race bonus and does not increase the race total. The 24 grid "
-                            "routes mirror planner checklist v1 and the six hallways mirror its goal "
-                            "definitions. Corp's component recipe is inferred from the supplied event log "
-                            "because the planner does not define that bonus checklist."
-                        )
                         st.dataframe(
                             pd.DataFrame(board_readiness_rows(board_rules)),
                             hide_index=True,
@@ -603,10 +660,6 @@ def main():
                             lambda x: int(x) if float(x).is_integer() else x
                         )
                     else:
-                        st.caption(
-                            "Ranked by completed race tiles, then current board section and section progress. "
-                            "The Corp Beast bonus is displayed separately and does not affect rank."
-                        )
                         team_df = pd.DataFrame(
                             [
                                 {
@@ -620,7 +673,6 @@ def main():
                                     "Section Progress": (
                                         f"{progress['section_completed']}/{progress['section_total']}"
                                     ),
-                                    "Ignored Locked": progress['ignored_locked_count'],
                                     "Nonqualifying": progress['nonqualifying_count'],
                                     "Submissions": int((df['Team'] == team).sum()),
                                     "_Section Completed": progress['section_completed'],
@@ -663,7 +715,6 @@ def main():
             # TAB 2: PLAYER LEADERBOARD
             with tab_player_leaderboard:
                 st.subheader("Player Leaderboard")
-                st.caption("All players ranked by submissions; ties are ordered alphabetically.")
                 player_leaderboard_df = (
                     df.groupby(['Player', 'Team'], as_index=False)['Quantity']
                     .sum()
@@ -749,64 +800,36 @@ def main():
                     history_cols = ['Date', 'Category', 'Item']
                     if has_points:
                         history_cols.append('Points')
+                    player_history = (
+                        p_data[history_cols]
+                        .sort_values('Date', ascending=False)
+                        .copy()
+                    )
+                    player_history['Date'] = player_history['Date'].map(
+                        lambda value: (
+                            pd.Timestamp(value).strftime('%d %b %Y, %H:%M')
+                            if pd.notna(value)
+                            else ''
+                        )
+                    )
                     st.dataframe(
-                        p_data[history_cols].sort_values('Date', ascending=False),
+                        player_history,
+                        hide_index=True,
                         width='stretch'
                     )
 
             # TAB 5: PLAYER RANKINGS
             with tab_rankings:
-                st.subheader("Top Players by Category")
-                categories = sorted(df['Category'].dropna().unique())
-                if categories:
-                    selected_rank_category = st.selectbox(
-                        "Choose a Category",
-                        categories,
-                        key="rank_category"
-                    )
-
-                    cat_rank_df = (
-                        df[df['Category'] == selected_rank_category]
-                        .groupby('Player', as_index=False)[activity_col]
-                        .sum()
-                        .rename(columns={activity_col: activity_label})
-                        .sort_values(activity_label, ascending=False)
-                    )
-                    cat_rank_df.insert(0, "Rank", range(1, len(cat_rank_df) + 1))
-                    st.dataframe(
-                        cat_rank_df[['Rank', 'Player', activity_label]],
-                        hide_index=True,
-                        width='stretch'
-                    )
-                else:
-                    st.info("No categories found in the uploaded data.")
-
-                st.divider()
-
-                st.subheader("Top Players by Item")
-                items = sorted(df['Item'].dropna().unique())
-                if items:
-                    selected_rank_item = st.selectbox(
-                        "Choose an Item",
-                        items,
-                        key="rank_item"
-                    )
-
-                    item_rank_df = (
-                        df[df['Item'] == selected_rank_item]
-                        .groupby('Player', as_index=False)[activity_col]
-                        .sum()
-                        .rename(columns={activity_col: activity_label})
-                        .sort_values(activity_label, ascending=False)
-                    )
-                    item_rank_df.insert(0, "Rank", range(1, len(item_rank_df) + 1))
-                    st.dataframe(
-                        item_rank_df[['Rank', 'Player', activity_label]],
-                        hide_index=True,
-                        width='stretch'
-                    )
-                else:
-                    st.info("No items found in the uploaded data.")
+                st.subheader("Player Contributions")
+                player_contribution_df = build_player_contribution_rankings(
+                    df,
+                    team_progress_by_name,
+                )
+                st.dataframe(
+                    player_contribution_df,
+                    hide_index=True,
+                    width='stretch',
+                )
 
             # TAB 6: TEAM RANKINGS
             with tab_team_rankings:

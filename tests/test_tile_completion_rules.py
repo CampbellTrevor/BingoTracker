@@ -170,26 +170,29 @@ class TileCompletionRulesTests(unittest.TestCase):
         self.assertTrue(evaluate_completion(state).complete)
 
     def test_known_nonqualifiers_are_recognized_but_never_advance(self):
-        yama = create_empty_state("final_yama")
-        for _ in range(7):
-            result = apply_submission(yama, "Soulflame Horn")
-            self.assertFalse(result.accepted)
-            self.assertEqual(result.reason, "known nonqualifying item")
-        self.assertFalse(evaluate_completion(yama).complete)
-
         cox = create_empty_state("middle_hallway_cox")
-        self.assertFalse(
-            apply_submission(cox, "Twisted Ancestral colour kit").accepted
-        )
+        result = apply_submission(cox, "Twisted Ancestral colour kit")
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.reason, "known nonqualifying item")
         self.assertFalse(evaluate_completion(cox).complete)
 
-    def test_yami_is_capped_at_one_occurrence(self):
+    def test_soulflame_horn_qualifies_and_duplicates_count(self):
         state = create_empty_state("final_yama")
         for _ in range(3):
-            apply_submission(state, "Yami")
+            outcome = apply_submission(state, "Soulflame Horn")
+            self.assertTrue(outcome.accepted)
+            self.assertEqual(outcome.item_key, "soulflame_horn")
+        self.assertTrue(evaluate_completion(state).complete)
+
+    def test_yama_counts_oathplate_horn_and_yami_but_caps_yami_at_one(self):
+        state = create_empty_state("final_yama")
+        for _ in range(3):
+            self.assertTrue(apply_submission(state, "Yami").accepted)
         self.assertFalse(evaluate_completion(state).complete)
-        apply_submission(state, "Oathplate Chest")
+
+        self.assertTrue(apply_submission(state, "Soulflame Horn").accepted)
         self.assertFalse(evaluate_completion(state).complete)
+
         apply_submission(state, "Oathplate Chest")
         self.assertTrue(evaluate_completion(state).complete)
 

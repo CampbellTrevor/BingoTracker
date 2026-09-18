@@ -2,7 +2,7 @@
   "schema_version": 2,
   "status": "authoritative",
   "source": "https://github.com/CampbellTrevor/fiddlstcks-tile-planner at checklist version tile-checklists-v1",
-  "notes": "Only qualifying post-unlock submissions count. Exactly one prepared Corrupted Gauntlet chest may contribute before the Final grid. Corp Beast is a separate bonus and is not one of the 30 race tiles; its shield + elixir + sigil recipe is inferred from the supplied event log because the planner does not define that checklist.",
+  "notes": "The supplied event log is authoritative even when recorded timestamps do not align with board unlocks. Corp Beast unlocks with the second grid and remains outside the 30 race tiles; its shield + elixir + sigil recipe is inferred from the supplied event log because the planner does not define that checklist.",
   "tiles": {
     "start_toa": {"status": "Any 2 accepted TOA uniques; duplicates count"},
     "start_nex": {"status": "Any 2 accepted Nex uniques; duplicates count"},
@@ -28,7 +28,7 @@
     "final_tob": {"status": "Complete the Justiciar set or obtain an eligible Scythe"},
     "final_doom": {"status": "Claim Eye of ayak, Mokhaiotl cloth, and Avernic treads"},
     "final_inferno": {"status": "3 distinct players each claim an Infernal cape"},
-    "final_yama": {"status": "Obtain any 3 qualifying Oathplate or Yami drops"},
+    "final_yama": {"status": "Obtain any 3 qualifying Oathplate, Soulflame Horn, or Yami drops"},
     "final_cox": {"status": "Complete Ancestral, obtain 2 Ancestral pieces plus Kodai/Elder maul, or obtain an eligible Twisted bow"},
     "final_tormented_demons": {"status": "Obtain any 6 Tormented synapse or Burning claw drops"},
     "final_zulrah": {"status": "Obtain 6 main-table uniques, either mutagen, or Snakeling"},

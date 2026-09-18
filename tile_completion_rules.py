@@ -8,9 +8,8 @@ human-readable progress.
 The 24 grid rules mirror ``fiddlstcks-tile-planner/tile_checklists.py``.  The six
 hallway rules mirror the goals in ``tile_difficulty.py``.  Corporeal Beast is the
 board's bonus tile; its event-log recipe is Spirit shield + Holy elixir + any
-sigil.  Unlock timing is deliberately out of scope here: callers decide whether
-a submission was eligible before applying it (including the one starting-CG-
-chest exception).
+sigil. Unlock timing is deliberately out of scope here; the event log is treated
+as the authoritative record of valid submissions.
 """
 
 from __future__ import annotations
@@ -563,12 +562,18 @@ _RULES = (
             "Obtain any three qualifying drops",
             _req(
                 "Qualifying occurrences",
-                ("oathplate_helm", "oathplate_chest", "oathplate_legs", "yami"),
+                (
+                    "oathplate_helm",
+                    "oathplate_chest",
+                    "oathplate_legs",
+                    "soulflame_horn",
+                    "yami",
+                ),
                 3,
                 caps={"yami": 1},
             ),
         ),
-        notes=("Armour duplicates count; Yami counts once; Soulflame Horn does not count.",),
+        notes=("Oathplate and Soulflame Horn duplicates count; Yami counts once.",),
     ),
     _tile(
         "final_cox",
@@ -701,9 +706,9 @@ _ITEM_KEY_OVERRIDES: Mapping[str, str | None] = MappingProxyType(
         "Lil' zik": "lil_zik",
         "Lil'viathan": "lilviathan",
         "Smol Heredit": "smol_heredit",
+        "Soulflame Horn": "soulflame_horn",
         # Known submitted nonqualifiers. They remain recognized so they are not
         # reported as spelling/alias failures, but apply_submission rejects them.
-        "Soulflame Horn": None,
         "Twisted Ancestral colour kit": None,
         "Twisted Ancestral color kit": None,
     }

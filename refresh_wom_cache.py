@@ -8,7 +8,7 @@ import csv
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
@@ -96,32 +96,27 @@ def _requested_metrics(app_file: Path) -> set[str]:
 
 
 def _fetch_bulk_gains(group_id: int, start_date: str, end_date: str):
-    query = urlencode({"startDate": start_date, "endDate": end_date})
+    query = urlencode(
+        {
+            "startDate": start_date,
+            "endDate": _exclusive_api_end_date(end_date),
+        }
+    )
     url = f"{WOM_API_BASE_URL}/groups/{group_id}/bulk-gained?{query}"
     request = Request(url, headers={"User-Agent": "Bapheads-BingoStats/1.0"})
     with urlopen(request, timeout=120) as response:
         return json.load(response)
 
 
-def _fetch_bulk_hiscores(group_id: int):
-    url = f"{WOM_API_BASE_URL}/groups/{group_id}/bulk-hiscores"
-    request = Request(url, headers={"User-Agent": "Bapheads-BingoStats/1.0"})
-    with urlopen(request, timeout=120) as response:
-        return json.load(response)
-
-
 def _fetch_player_gains(username: str, start_date: str, end_date: str):
-    query = urlencode({"startDate": start_date, "endDate": end_date})
+    query = urlencode(
+        {
+            "startDate": start_date,
+            "endDate": _exclusive_api_end_date(end_date),
+        }
+    )
     encoded_username = quote(username, safe="")
     url = f"{WOM_API_BASE_URL}/players/{encoded_username}/gained?{query}"
-    request = Request(url, headers={"User-Agent": "Bapheads-BingoStats/1.0"})
-    with urlopen(request, timeout=60) as response:
-        return json.load(response)
-
-
-def _fetch_player_details(username: str):
-    encoded_username = quote(username, safe="")
-    url = f"{WOM_API_BASE_URL}/players/{encoded_username}"
     request = Request(url, headers={"User-Agent": "Bapheads-BingoStats/1.0"})
     with urlopen(request, timeout=60) as response:
         return json.load(response)
@@ -165,89 +160,6 @@ def merge_player_gains(
             cache_payload["metrics"][metric_name][player_key] = numeric_gain
 
 
-def merge_player_current(
-    cache_payload: dict,
-    player_key: str,
-    player_details: dict,
-    requested_metrics: set[str],
-) -> None:
-    latest_snapshot = (
-        player_details.get("latestSnapshot", {})
-        if isinstance(player_details, dict)
-        else {}
-    )
-    data = (
-        latest_snapshot.get("data", {})
-        if isinstance(latest_snapshot, dict)
-        else {}
-    )
-    bosses = data.get("bosses", {}) if isinstance(data, dict) else {}
-    if not isinstance(bosses, dict):
-        raise ValueError(f"Unexpected player-details response for {player_key}")
-
-    for metric_name in requested_metrics:
-        metric_row = bosses.get(metric_name, {})
-        kills = metric_row.get("kills", 0) if isinstance(metric_row, dict) else 0
-        numeric_kills = float(kills or 0)
-        if numeric_kills.is_integer():
-            numeric_kills = int(numeric_kills)
-        # WOM uses -1 for an unranked boss. It is not a real negative KC.
-        if numeric_kills > 0:
-            cache_payload["current_metrics"][metric_name][player_key] = numeric_kills
-
-
-def merge_bulk_hiscores(
-    cache_payload: dict,
-    rows,
-    requested_metrics: set[str],
-) -> None:
-    metrics_seen: set[str] = set()
-
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        player = row.get("player")
-        if not isinstance(player, dict):
-            continue
-        player_name = (
-            player.get("username")
-            or player.get("displayName")
-            or player.get("name")
-        )
-        player_key = _normalize_name(player_name)
-        if not player_key:
-            continue
-
-        snapshot = row.get("data", {})
-        snapshot_data = snapshot.get("data", {}) if isinstance(snapshot, dict) else {}
-        bosses = (
-            snapshot_data.get("bosses", {})
-            if isinstance(snapshot_data, dict)
-            else {}
-        )
-        if not isinstance(bosses, dict):
-            continue
-
-        for metric_name in requested_metrics:
-            metric_row = bosses.get(metric_name)
-            if not isinstance(metric_row, dict):
-                continue
-            metrics_seen.add(metric_name)
-            numeric_kills = float(metric_row.get("kills", 0) or 0)
-            if numeric_kills.is_integer():
-                numeric_kills = int(numeric_kills)
-            # WOM uses -1 for an unranked boss. It is not a real negative KC.
-            if numeric_kills > 0:
-                cache_payload["current_metrics"][metric_name][player_key] = numeric_kills
-
-    missing_metrics = sorted(requested_metrics - metrics_seen)
-    if missing_metrics:
-        raise ValueError(
-            "Wise Old Man bulk hiscores did not include mapped metrics: "
-            + ", ".join(missing_metrics)
-        )
-
-
 def build_cache_payload(
     rows,
     group_id: int,
@@ -256,7 +168,6 @@ def build_cache_payload(
     requested_metrics: set[str],
 ) -> dict:
     metric_maps = {metric: {} for metric in sorted(requested_metrics)}
-    current_metric_maps = {metric: {} for metric in sorted(requested_metrics)}
     metrics_seen: set[str] = set()
 
     for row in rows:
@@ -305,8 +216,15 @@ def build_cache_payload(
             "+00:00", "Z"
         ),
         "metrics": metric_maps,
-        "current_metrics": current_metric_maps,
     }
+
+
+def _exclusive_api_end_date(logical_end_date: str) -> str:
+    """Convert the event's inclusive end date to WOM's exclusive endDate."""
+
+    return (
+        datetime.strptime(logical_end_date, "%Y-%m-%d") + timedelta(days=1)
+    ).date().isoformat()
 
 
 def main() -> None:
@@ -324,14 +242,12 @@ def main() -> None:
     end_date = args.end_date or derived_end
     if (args.start_date is None) != (args.end_date is None):
         parser.error("--start-date and --end-date must be supplied together")
+    api_end_date = _exclusive_api_end_date(end_date)
 
     requested_metrics = _requested_metrics(args.app_file)
     rows = _fetch_bulk_gains(args.group_id, start_date, end_date)
     if not isinstance(rows, list):
         raise ValueError("Unexpected Wise Old Man bulk-gained response format")
-    hiscore_rows = _fetch_bulk_hiscores(args.group_id)
-    if not isinstance(hiscore_rows, list):
-        raise ValueError("Unexpected Wise Old Man bulk-hiscores response format")
 
     payload = build_cache_payload(
         rows,
@@ -340,38 +256,29 @@ def main() -> None:
         end_date,
         requested_metrics,
     )
-    merge_bulk_hiscores(payload, hiscore_rows, requested_metrics)
 
     # The group endpoint is authoritative for current members. A participant
     # can leave the group after submitting, so use player-level endpoints only
-    # for event names absent from one or both bulk responses.
+    # for event names absent from the bulk response.
     bulk_gain_player_keys = _bulk_player_keys(rows)
-    bulk_current_player_keys = _bulk_player_keys(hiscore_rows)
     event_players = _event_player_lookups(args.csv, args.app_file)
     supplemented_players: list[str] = []
     unavailable_players: list[str] = []
     for player_key, query_name in sorted(event_players.items()):
-        needs_gains = player_key not in bulk_gain_player_keys
-        needs_current = player_key not in bulk_current_player_keys
-        if not needs_gains and not needs_current:
+        if player_key in bulk_gain_player_keys:
             continue
         try:
-            if needs_gains:
-                player_gains = _fetch_player_gains(query_name, start_date, end_date)
-                merge_player_gains(
-                    payload,
-                    player_key,
-                    player_gains,
-                    requested_metrics,
-                )
-            if needs_current:
-                player_details = _fetch_player_details(query_name)
-                merge_player_current(
-                    payload,
-                    player_key,
-                    player_details,
-                    requested_metrics,
-                )
+            player_gains = _fetch_player_gains(
+                query_name,
+                start_date,
+                end_date,
+            )
+            merge_player_gains(
+                payload,
+                player_key,
+                player_gains,
+                requested_metrics,
+            )
         except HTTPError as exc:
             if exc.code == 404:
                 unavailable_players.append(query_name)
@@ -385,7 +292,8 @@ def main() -> None:
     )
     print(
         f"Wrote {len(payload['metrics'])} metrics for {len(rows)} group members "
-        f"to {args.output} ({start_date}..{end_date})."
+        f"to {args.output} ({start_date}..{end_date} inclusive; "
+        f"WOM endDate={api_end_date} exclusive)."
     )
     if supplemented_players:
         print("Supplemented former/non-group players: " + ", ".join(supplemented_players))

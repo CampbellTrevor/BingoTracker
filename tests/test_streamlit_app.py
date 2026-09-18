@@ -329,7 +329,7 @@ class StreamlitAppTests(unittest.TestCase):
             ],
         )
 
-    def test_highest_kc_uses_current_totals_and_collapses_raid_tiles(self):
+    def test_highest_kc_uses_event_gains_and_collapses_raid_tiles(self):
         app = AppTest.from_file(
             str(PROJECT_DIR / "bingostats.py"), default_timeout=30
         ).run()
@@ -345,7 +345,7 @@ class StreamlitAppTests(unittest.TestCase):
         category_selector.set_value("Chambers of Xeric").run()
         self.assertEqual(len(app.exception), 0)
 
-        kc_columns = ["Rank", "Player", "Current KC", "Submissions"]
+        kc_columns = ["Rank", "Player", "KC Gain", "Submissions"]
         kc_table = next(
             dataframe.value
             for dataframe in app.dataframe
@@ -375,7 +375,6 @@ class StreamlitAppTests(unittest.TestCase):
         cache_payload = json.loads(
             (PROJECT_DIR / "wom_group_cache.json").read_text(encoding="utf-8-sig")
         )
-        current_metrics = cache_payload["current_metrics"]
         event_metrics = cache_payload["metrics"]
         raid_metrics = (
             "chambers_of_xeric",
@@ -390,30 +389,16 @@ class StreamlitAppTests(unittest.TestCase):
             )
             return "thrayge" if normalized == "ironthrage" else normalized
 
-        current_total_candidates = []
         for player in kc_table["Player"]:
             player_key = wom_key(player)
-            current_total = sum(
-                current_metrics[metric].get(player_key, 0)
-                for metric in raid_metrics
-            )
-            event_gain = sum(
+            expected_event_gain = sum(
                 event_metrics[metric].get(player_key, 0)
                 for metric in raid_metrics
             )
-            if current_total > 0 and current_total != event_gain:
-                current_total_candidates.append(
-                    (player, int(current_total), int(event_gain))
-                )
-
-        self.assertTrue(
-            current_total_candidates,
-            "Expected at least one event player whose current KC differs from event gain",
-        )
-        player, expected_current_total, event_gain = current_total_candidates[0]
-        displayed_current_total = int(kc_by_player.loc[player, "Current KC"])
-        self.assertEqual(displayed_current_total, expected_current_total)
-        self.assertNotEqual(displayed_current_total, event_gain)
+            self.assertEqual(
+                float(kc_by_player.loc[player, "KC Gain"]),
+                float(expected_event_gain),
+            )
 
         kc_figure = next(
             json.loads(chart.proto.spec)
@@ -422,7 +407,7 @@ class StreamlitAppTests(unittest.TestCase):
             .get("layout", {})
             .get("title", {})
             .get("text", "")
-            == "Highest Current KC - Chambers of Xeric"
+            == "Top KC Gains - Chambers of Xeric"
         )
         plotted_players = kc_table.head(20)["Player"].tolist()
         yaxis = kc_figure["layout"]["yaxis"]
@@ -433,6 +418,42 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertEqual(
             kc_figure["layout"]["height"],
             max(500, 36 * len(plotted_players) + 140),
+        )
+
+        app.selectbox(key="highest_kc_category").set_value(
+            "Tombs of Amascut"
+        ).run()
+        self.assertEqual(len(app.exception), 0)
+        toa_table = next(
+            dataframe.value
+            for dataframe in app.dataframe
+            if list(dataframe.value.columns) == kc_columns
+        )
+        toa_submission_counts = {}
+        toa_tile_counts = {"Tombs of Amascut": 0, "Tombs of Amascut 2": 0}
+        with (PROJECT_DIR / "Summer Bingo 2026 Event Log.csv").open(
+            encoding="utf-8-sig", newline=""
+        ) as source:
+            for row in csv.DictReader(source):
+                if row["Tile"] not in toa_tile_counts:
+                    continue
+                toa_tile_counts[row["Tile"]] += 1
+                player = row["Player Name"].strip()
+                toa_submission_counts[player] = (
+                    toa_submission_counts.get(player, 0) + 1
+                )
+
+        self.assertGreater(toa_tile_counts["Tombs of Amascut"], 0)
+        self.assertGreater(toa_tile_counts["Tombs of Amascut 2"], 0)
+        toa_by_player = toa_table.set_index("Player")
+        for player, expected_count in toa_submission_counts.items():
+            self.assertEqual(
+                int(toa_by_player.loc[player, "Submissions"]),
+                expected_count,
+            )
+        self.assertEqual(
+            int(toa_table["Submissions"].sum()),
+            sum(toa_tile_counts.values()),
         )
 
     def test_example_csv_renders_complete_race_bonus_and_partial_teams(self):

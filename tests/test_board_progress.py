@@ -20,13 +20,13 @@ from board_progress import (  # noqa: E402
 
 GRID_ONE_SEQUENCE = [
     "GWD",
-    "Venator Shards",
+    "Muspah",
     "Vorkath",
     "DKS",
     "Revs",
     "TOB",
     "Colosseum",
-    "Zenytes",
+    "Zenyte Shards",
     "Royal Titans",
     "Barrows",
     "Cerberus",
@@ -39,14 +39,14 @@ FINAL_GRID_AFTER_CG = [
     "Doom",
     "Inferno",
     "Yama",
-    "COX",
-    "Moons of Peril",
+    "Chambers of Xeric 2",
+    "Tormented Demons",
     "Zulrah",
     "Maggot King",
-    "TOA",
+    "Tombs of Amascut 2",
 ]
 FULL_SEQUENCE = (
-    ["CG", "TOA", "Nex", "Hueycoatl"]
+    ["Gauntlet", "TOA", "Nex", "Hueycoatl"]
     + GRID_ONE_SEQUENCE
     + ["Voidwaker", "PNM/Nightmare", "COX"]
     + FINAL_GRID_AFTER_CG
@@ -98,6 +98,25 @@ class BoardProgressTests(unittest.TestCase):
         self.assertIsNone(match_tile_key("Barrows / Moons"))
         self.assertIsNone(match_tile_key("Colo / Inferno"))
 
+    def test_confirmed_summer_event_log_aliases_and_visible_label(self):
+        expected_aliases = {
+            "Muspah": "venator_shards",
+            "Zenyte Shards": "zenytes",
+            "Gauntlet": "corrupted_gauntlet",
+            "Chambers of Xeric 2": "cox",
+            "Tombs of Amascut 2": "toa",
+            "Tormented Demons": "moons_of_peril",
+        }
+        for csv_name, canonical_key in expected_aliases.items():
+            with self.subTest(csv_name=csv_name):
+                self.assertEqual(match_tile_key(csv_name), canonical_key)
+
+        tormented_demons_tile = next(
+            tile for tile in BOARD_TILES if tile.tile_id == "final_moons_of_peril"
+        )
+        self.assertEqual(tormented_demons_tile.canonical_key, "moons_of_peril")
+        self.assertEqual(tormented_demons_tile.label, "TORMENTED DEMONS")
+
     def test_opening_hallway_is_ordered_and_early_rows_are_not_banked(self):
         events = [
             ("Nex", "EARLY_NEX"),
@@ -148,11 +167,11 @@ class BoardProgressTests(unittest.TestCase):
         states = progress["states"]
 
         self.assertIn("DROP_1_TOA", states["start_toa"]["completion"]["Item"])
-        self.assertIn("DROP_29_TOA", states["final_toa"]["completion"]["Item"])
+        self.assertIn("DROP_29_Tombs of Amascut 2", states["final_toa"]["completion"]["Item"])
         self.assertIn("DROP_9_TOB", states["grid_tob"]["completion"]["Item"])
         self.assertIn("DROP_21_TOB", states["final_tob"]["completion"]["Item"])
         self.assertIn("DROP_18_COX", states["path_cox"]["completion"]["Item"])
-        self.assertIn("DROP_25_COX", states["final_cox"]["completion"]["Item"])
+        self.assertIn("DROP_25_Chambers of Xeric 2", states["final_cox"]["completion"]["Item"])
 
     def test_full_sequence_completes_all_31_slots(self):
         progress = calculate_team_progress(pd.DataFrame(make_rows(FULL_SEQUENCE)), "AOCL")

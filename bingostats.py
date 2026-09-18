@@ -93,6 +93,11 @@ CATEGORY_TO_WOM_BOSSES = {
     "Zalcano": ["zalcano"],
 }
 
+HIGHEST_KC_CATEGORY_ALIASES = {
+    "Chambers of Xeric 2": "Chambers of Xeric",
+    "Tombs of Amascut 2": "Tombs of Amascut",
+}
+
 # --- 1. Data Cleaning Engine ---
 @st.cache_data
 def load_and_clean_data(file):
@@ -190,6 +195,11 @@ def _resolve_csv_player_to_wom_key(player_name):
     if alias_target:
         return _normalize_name(alias_target)
     return _normalize_name(raw_name)
+
+
+def _highest_kc_category_label(category):
+    category_label = str(category or "").strip()
+    return HIGHEST_KC_CATEGORY_ALIASES.get(category_label, category_label)
 
 
 def build_player_contribution_rankings(df, team_progress_by_name):
@@ -449,6 +459,48 @@ def load_wom_group_metrics_from_file(cache_path, group_id, start_date_str, end_d
     return kc_by_metric, notes
 
 
+@st.cache_data(ttl=300)
+def load_wom_current_metrics_from_file(cache_path, group_id, metrics):
+    """Load current KC totals, which are independent of the event date range."""
+    file_path = Path(cache_path)
+    if not file_path.exists():
+        return {}, [f"WOM cache file not found: {file_path.name}"]
+
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        return {}, [f"Failed to read WOM cache file: {exc}"]
+
+    file_group_id = payload.get("group_id")
+    if file_group_id != group_id:
+        return {}, [f"WOM cache group_id mismatch (file={file_group_id}, app={group_id})"]
+
+    file_metrics = payload.get("current_metrics")
+    if not isinstance(file_metrics, dict):
+        return {}, ["WOM cache format invalid: current_metrics should be an object"]
+
+    notes = []
+    kc_by_metric = {}
+    for metric_name in metrics:
+        metric_map = file_metrics.get(metric_name)
+        if not isinstance(metric_map, dict):
+            continue
+
+        normalized_metric_map = {}
+        for player_key, current_value in metric_map.items():
+            try:
+                normalized_metric_map[_normalize_name(player_key)] = float(current_value or 0)
+            except (TypeError, ValueError):
+                normalized_metric_map[_normalize_name(player_key)] = 0.0
+        kc_by_metric[metric_name] = normalized_metric_map
+
+    missing_metrics = sorted(set(metrics) - set(kc_by_metric.keys()))
+    if missing_metrics:
+        notes.append("Missing current metrics in WOM cache: " + ", ".join(missing_metrics[:12]))
+
+    return kc_by_metric, notes
+
+
 # --- 2. App Interface ---
 def main():
     st.markdown("### Summer Bingo 2026 Dashboard")
@@ -539,12 +591,17 @@ def main():
                     if metric in SUPPORTED_WOM_BOSS_METRICS
                 }
             )
-            prefetched_kc_by_metric, wom_cache_notes = load_wom_group_metrics_from_file(
+            prefetched_kc_by_metric, _event_wom_cache_notes = load_wom_group_metrics_from_file(
                 str(WOM_CACHE_FILE),
                 WOM_GROUP_ID,
                 event_start_date_str,
                 event_end_date_str,
                 tuple(prefetch_metrics)
+            )
+            current_kc_by_metric, current_wom_cache_notes = load_wom_current_metrics_from_file(
+                str(WOM_CACHE_FILE),
+                WOM_GROUP_ID,
+                tuple(prefetch_metrics),
             )
 
             board_rules = load_tile_rules(TILE_RULES_FILE)
@@ -896,26 +953,20 @@ def main():
 
             # TAB 7: HIGHEST KC
             with tab_highest_kc:
-                st.subheader("Highest KC by Category")
-                st.caption(
-                    f"Using cached WOM data from {WOM_CACHE_FILE.name} for range "
-                    f"{event_start_date_str} to {event_end_date_str}."
-                )
-                if wom_cache_notes:
-                    if not prefetched_kc_by_metric:
-                        st.warning(
-                            "The cached Wise Old Man snapshot does not cover this event range, "
-                            "so prior-event KC is not being shown."
-                        )
+                st.subheader("Highest Current KC by Category")
+                if current_wom_cache_notes:
+                    if not current_kc_by_metric:
+                        st.warning("Current Wise Old Man KC is unavailable in the cache.")
                     with st.expander("Wise Old Man cache notes"):
-                        for cache_note in wom_cache_notes:
+                        for cache_note in current_wom_cache_notes:
                             st.write(f"- {cache_note}")
 
                 available_kc_categories = sorted(
-                    [
-                        cat for cat in df["Category"].dropna().unique()
-                        if cat in CATEGORY_TO_WOM_BOSSES
-                    ]
+                    {
+                        _highest_kc_category_label(category)
+                        for category in df["Category"].dropna().unique()
+                        if _highest_kc_category_label(category) in CATEGORY_TO_WOM_BOSSES
+                    }
                 )
 
                 if available_kc_categories:
@@ -930,8 +981,9 @@ def main():
                     ]
 
                     if selected_kc_metrics:
+                        category_labels = df["Category"].map(_highest_kc_category_label)
                         category_activity_by_player = (
-                            df[df["Category"] == selected_kc_category]
+                            df[category_labels == selected_kc_category]
                             .groupby("Player", as_index=False)[activity_col]
                             .sum()
                         )
@@ -939,8 +991,8 @@ def main():
                         kc_rows = []
                         for player in sorted(df["Player"].dropna().unique()):
                             wom_lookup_key = _resolve_csv_player_to_wom_key(player)
-                            player_kc_gain = sum(
-                                prefetched_kc_by_metric.get(metric_name, {}).get(wom_lookup_key, 0.0)
+                            player_current_kc = sum(
+                                current_kc_by_metric.get(metric_name, {}).get(wom_lookup_key, 0.0)
                                 for metric_name in selected_kc_metrics
                             )
                             player_activity_value = float(
@@ -952,27 +1004,40 @@ def main():
                             kc_rows.append(
                                 {
                                     "Player": player,
-                                    "KC Gain": round(player_kc_gain, 2),
+                                    "Current KC": round(player_current_kc, 2),
                                     activity_label: round(player_activity_value, 2),
                                 }
                             )
 
                         kc_df = pd.DataFrame(kc_rows).sort_values(
-                            by=["KC Gain", activity_label],
+                            by=["Current KC", activity_label],
                             ascending=[False, False]
                         ).reset_index(drop=True)
                         kc_df.insert(0, "Rank", range(1, len(kc_df) + 1))
 
+                        plotted_kc_df = kc_df.head(20).copy()
+                        plotted_players = plotted_kc_df["Player"].tolist()
+                        chart_height = max(500, (36 * len(plotted_kc_df)) + 140)
                         fig_kc = px.bar(
-                            kc_df.head(20),
-                            x="KC Gain",
+                            plotted_kc_df,
+                            x="Current KC",
                             y="Player",
                             orientation="h",
-                            text="KC Gain",
-                            color="KC Gain",
-                            title=f"Top KC Gains - {selected_kc_category}"
+                            text="Current KC",
+                            color="Current KC",
+                            title=f"Highest Current KC - {selected_kc_category}"
                         )
-                        fig_kc.update_layout(yaxis={"categoryorder": "total ascending"})
+                        fig_kc.update_layout(
+                            height=chart_height,
+                            xaxis_title="Current KC",
+                            yaxis={
+                                "categoryorder": "total ascending",
+                                "tickmode": "array",
+                                "tickvals": plotted_players,
+                                "ticktext": plotted_players,
+                                "automargin": True,
+                            },
+                        )
                         st.plotly_chart(fig_kc, width='stretch')
                         st.dataframe(kc_df, hide_index=True, width='stretch')
                     else:
